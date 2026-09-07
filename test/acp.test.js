@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
@@ -696,7 +696,8 @@ test('passes the ACP cwd to the isolated agy process', async () => {
       sessionId: session.result.sessionId, prompt: [{ type: 'text', text: 'cwd' }]
     } });
     await app.waitFor((m) => m.id === 3);
-    assert.equal((await readFile(join(app.captureDir, 'cwd.txt'), 'utf8')).trim(), app.captureDir);
+    const childCwd = (await readFile(join(app.captureDir, 'cwd.txt'), 'utf8')).trim();
+    assert.equal(await realpath(childCwd), await realpath(app.captureDir));
   } finally {
     await app.close();
   }
