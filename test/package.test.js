@@ -29,7 +29,10 @@ test('packages only the ACP runtime and required documentation', () => {
     'CONTRIBUTING.md',
     'src/models.js',
     'src/executables.js',
-    'src/setup.js'
+    'src/setup.js',
+    'bin/agy-buzz-manage.js',
+    'src/manage.js',
+    'src/status.js'
   ]);
   const files = new Set(packageJson.files);
   for (const excluded of ['fixtures/fake-buzz.js', 'test/fixtures/fake-buzz.js', 'test']) {

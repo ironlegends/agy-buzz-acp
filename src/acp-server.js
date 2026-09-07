@@ -105,7 +105,7 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
             promptCapabilities: { image: false, audio: false, embeddedContext: false },
             mcpCapabilities: { http: false, sse: false }
           },
-          agentInfo: { name: 'agy-buzz-acp', version: '0.3.0' }
+          agentInfo: { name: 'agy-buzz-acp', version: '0.4.0' }
         }));
         return;
       }

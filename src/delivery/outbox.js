@@ -3,9 +3,24 @@ import { chmod, mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/
 import { join } from 'node:path';
 
 const OWNER_RE = /^[0-9a-f]{64}$/i;
+const CHANNEL_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const EVENT_RE = /^[0-9a-f]{64}$/i;
+const RECORD_STATUSES = new Set(['inflight', 'uncertain', 'failed-before-start', 'sent']);
 
 function validId(id) {
   return typeof id === 'string' && /^[A-Za-z0-9_-]{1,96}$/.test(id);
+}
+
+export function validateOutboxRecord(record) {
+  if (!record || typeof record !== 'object' || Array.isArray(record) ||
+      !validId(record.recoveryId) || !OWNER_RE.test(record.owner ?? '') ||
+      !CHANNEL_RE.test(record.channelId ?? '') || typeof record.replyTo !== 'string' ||
+      typeof record.content !== 'string' || !RECORD_STATUSES.has(record.status) ||
+      typeof record.createdAt !== 'string' || typeof record.updatedAt !== 'string' ||
+      (record.eventId !== undefined && !EVENT_RE.test(record.eventId))) return false;
+  const keys = Object.keys(record).sort().join(',');
+  return keys === 'channelId,content,createdAt,owner,recoveryId,replyTo,status,updatedAt' ||
+    keys === 'channelId,content,createdAt,eventId,owner,recoveryId,replyTo,status,updatedAt';
 }
 
 export class DeliveryOutbox {

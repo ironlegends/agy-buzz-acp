@@ -25,10 +25,10 @@ npm pack
 Install the generated archive, or an archive from a reviewed release:
 
 ```sh
-npm install --global ./agy-buzz-acp-0.3.0.tgz
+npm install --global ./agy-buzz-acp-0.4.0.tgz
 ```
 
-The package provides `agy-buzz-acp`, `agy-buzz-recover`, and `agy-buzz-doctor`. No npm dependencies are needed. No npm-registry publication is required to install the archive.
+The package provides `agy-buzz-acp`, `agy-buzz-recover`, `agy-buzz-doctor`, and `agy-buzz-manage`. No npm dependencies are needed. No npm-registry publication is required to install the archive.
 
 Generate the custom harness settings using your actual installation paths:
 
@@ -154,3 +154,11 @@ Authentication remains entirely in the official CLI. This package neither extrac
 - [Buzz's standalone-adapter guidance](https://github.com/block/buzz/issues/2393#issuecomment-5097071833)
 
 MIT license. See [LICENSE](LICENSE).
+
+## Operational diagnostics and upgrades
+
+Use `agy-buzz-doctor --harness /path/to/harness.json --json` to inspect the configured installation and aggregate recovery state. The running version remains unknown unless independently observed; a configured path does not prove an existing process has reloaded it. The default diagnostic is offline. `--latest` explicitly queries the public release metadata, and `--models` explicitly queries the provider catalog. See [diagnostics](docs/DIAGNOSTICS.md).
+
+Use `agy-buzz-manage` to plan a local archive installation or rollback. Supply the expected SHA-256 from a trusted release reference. Changes require `--apply`; the tool does not restart agents or refresh Desktop. See [upgrades and rollback](docs/UPGRADING.md).
+
+The [shutdown limitation](docs/COMPATIBILITY.md#shutdown-limitation-in-buzz) must be resolved before relying on durable conversation recovery across a Buzz restart. Outbox recovery and conversation recovery are separate mechanisms.

@@ -1,10 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { runDoctor, runDoctorCli } from '../src/doctor.js';
+import { parseDoctorArgs, runDoctor, runDoctorCli } from '../src/doctor.js';
+import { inspectStateDirectory, stateSummaryStatus } from '../src/status.js';
 
 async function executableFixture(testContext) {
   const root = await mkdtemp(join(tmpdir(), 'agy doctor path with spaces-'));
@@ -317,7 +318,8 @@ test('capability checks are explicit, bounded, shell-free, and discard command o
   };
   const report = await runDoctor({
     checkCapabilities: true,
-    env: { AGY_COMMAND: 'agy', BUZZ_CLI_COMMAND: 'buzz' },
+    env: { AGY_COMMAND: '/fixture/bin/agy', BUZZ_CLI_COMMAND: '/fixture/bin/buzz' },
+    fsImpl: { stat: async () => ({ isFile: () => true }), access: async () => {} },
     nodeVersion: '22.0.0',
     platform: 'linux',
     spawnImpl,
@@ -345,4 +347,172 @@ test('CLI wrapper exposes help without loading or invoking the adapter runtime',
   assert.equal(exitCode, 0);
   assert.match(output, /Usage: agy-buzz-doctor/);
   assert.equal(errors, '');
+});
+
+test('doctor reports a harness package version and keeps running version unknown', async (t) => {
+  const harnessRoot = await mkdtemp(join(tmpdir(), 'agy-doctor-harness-'));
+  t.after(() => rm(harnessRoot, { recursive: true, force: true }));
+  const adapterPath = join(process.cwd(), 'bin', 'agy-buzz-acp.js');
+  const harnessPath = join(harnessRoot, 'harness.json');
+  await writeFile(harnessPath, JSON.stringify({
+    id: 'agy-buzz-acp', command: process.execPath,
+    args: [adapterPath],
+    env: { AGY_COMMAND: process.execPath, BUZZ_CLI_COMMAND: process.execPath, AGY_TOKEN: 'secret' }
+  }));
+  const report = await runDoctor({
+    harness: harnessPath, env: {}, platform: process.platform, nodeVersion: '22.0.0'
+  });
+
+  assert.equal(report.harness.status, 'pass');
+  assert.match(report.harness.adapter.version, /^\d+\.\d+\.\d+$/);
+  assert.equal(report.harness.adapter.runningVersion, null);
+  assert.equal(report.harness.paths.adapterPath, adapterPath);
+  assert.equal(JSON.stringify(report).includes('secret'), false);
+});
+
+test('harness diagnostics read the target package metadata instead of the doctor package', async (t) => {
+  const harnessRoot = await mkdtemp(join(tmpdir(), 'agy-doctor-old-harness-'));
+  t.after(() => rm(harnessRoot, { recursive: true, force: true }));
+  await mkdir(join(harnessRoot, 'bin'));
+  const adapterPath = join(harnessRoot, 'bin', 'agy-buzz-acp.js');
+  await writeFile(adapterPath, '#!/usr/bin/env node');
+  await writeFile(join(harnessRoot, 'package.json'), JSON.stringify({ name: 'agy-buzz-acp', version: '0.1.2' }));
+  const harnessPath = join(harnessRoot, 'harness.json');
+  await writeFile(harnessPath, JSON.stringify({ id: 'agy-legacy-custom', command: process.execPath.replaceAll('\\', '/'),
+    args: [adapterPath], env: { AGY_COMMAND: process.execPath, BUZZ_CLI_COMMAND: process.execPath } }));
+
+  const report = await runDoctor({ harness: harnessPath, env: {}, platform: process.platform, nodeVersion: '22.0.0' });
+
+  assert.equal(report.harness.adapter.configuredVersion, '0.1.2');
+  assert.equal(report.adapter.configuredVersion, '0.1.2');
+  assert.equal(report.harness.adapter.runningVersion, null);
+  assert.notEqual(report.doctorVersion, report.harness.adapter.configuredVersion);
+});
+
+test('latest release lookup is opt-in, bounded, and sends no auth headers', async () => {
+  let calls = 0;
+  let request;
+  const report = await runDoctor({
+    latest: true, env: {}, platform: 'linux', nodeVersion: '22.0.0',
+    fetchImpl: async (url, options) => {
+      calls += 1; request = { url, options };
+      return { ok: true, json: async () => ({ tag_name: 'v0.4.0' }) };
+    }
+  });
+
+  assert.equal(calls, 1);
+  assert.match(request.url, /api\.github\.com\/repos\/ironlegends\/agy-buzz-acp\/releases\/latest$/);
+  assert.equal(request.options.headers.authorization, undefined);
+  assert.equal(report.latest.status, 'pass');
+  assert.equal(report.latest.version, '0.4.0');
+});
+
+test('latest release body is bounded and timeout covers response parsing', async () => {
+  const oversized = await runDoctor({ latest: true, timeoutMs: 10, env: {}, nodeVersion: '22.0.0',
+    fetchImpl: async () => ({ ok: true, text: async () => 'x'.repeat(64 * 1024 + 1) }) });
+  assert.equal(oversized.latest.status, 'warn');
+  const started = Date.now();
+  const hanging = await runDoctor({ latest: true, timeoutMs: 10, env: {}, nodeVersion: '22.0.0',
+    fetchImpl: async () => ({ ok: true, text: async () => new Promise(() => {}) }) });
+  assert.equal(hanging.latest.status, 'warn');
+  assert.ok(Date.now() - started < 1000);
+});
+
+test('models lookup is opt-in and launches the configured agy without a shell', async () => {
+  const agy = 'C:\\tools\\agy.exe';
+  const calls = [];
+  const report = await runDoctor({
+    models: true,
+    env: { AGY_COMMAND: agy }, platform: 'win32', nodeVersion: '22.0.0',
+    fsImpl: { stat: async () => ({ isFile: () => true }), access: async () => {} },
+    spawnImpl: (command, args, options) => {
+      calls.push({ command, args, options });
+      const child = new EventEmitter();
+      child.stdout = new EventEmitter();
+      queueMicrotask(() => { child.stdout.emit('data', 'gemini-test-high\tGemini Test\n'); child.emit('close', 0); });
+      return child;
+    }
+  });
+
+  assert.equal(report.models.status, 'pass');
+  assert.deepEqual(report.models.models, [{ modelId: 'gemini-test-high', name: 'Gemini Test' }]);
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].args, ['models']);
+  assert.equal(calls[0].options.shell, false);
+});
+
+test('state diagnostics summarize records and stale locks without mutating files', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'agy-doctor-state-'));
+  const outbox = join(root, 'outbox');
+  const session = join(root, 'session');
+  await mkdir(outbox); await mkdir(session);
+  const outboxBase = { recoveryId: 'sent', owner: 'a'.repeat(64), channelId: '11111111-1111-4111-8111-111111111111', replyTo: 'd'.repeat(64), content: 'private answer', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+  await writeFile(join(outbox, 'sent.json'), JSON.stringify({ ...outboxBase, status: 'sent' }));
+  await writeFile(join(outbox, 'uncertain.json'), JSON.stringify({ ...outboxBase, recoveryId: 'uncertain', status: 'uncertain' }));
+  const scope = { owner: 'b'.repeat(64), relay: 'c'.repeat(64), cwd: root, model: 'gemini-test-high', channelId: '11111111-1111-4111-8111-111111111111' };
+  await writeFile(join(session, 'ready.json'), JSON.stringify({ schemaVersion: 1, sessionScope: 'channel', status: 'ready', scope, conversationId: 'private-conversation', updatedAt: new Date().toISOString() }));
+  await writeFile(join(session, 'blocked.json'), JSON.stringify({ schemaVersion: 1, sessionScope: 'channel', status: 'blocked', scope, conversationId: null, updatedAt: new Date().toISOString() }));
+  const lock = join(session, '.deadbeef.lock');
+  await mkdir(lock); await writeFile(join(lock, 'owner'), '999999\n');
+  await utimes(lock, new Date(0), new Date(0));
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  const report = await runDoctor({
+    env: { AGY_OUTBOX_DIR: outbox, AGY_OUTBOX_OWNER: 'a'.repeat(64), AGY_SESSION_DIR: session, AGY_SESSION_OWNER: 'b'.repeat(64), BUZZ_RELAY_URL: 'https://relay.example.invalid' },
+    platform: 'linux', nodeVersion: '22.0.0',
+    processAliveImpl: () => false
+  });
+
+  assert.equal(report.state.stores.outbox.records.ready, 1);
+  assert.equal(report.state.stores.outbox.records.uncertain, 1);
+  assert.equal(report.state.stores.outbox.records.uncertain, 1);
+  assert.equal(report.state.stores.session.records.ready, 1);
+  assert.equal(report.state.stores.session.records.blocked, 1);
+  assert.equal(report.state.stores.session.locks.stale, 1);
+  assert.equal(report.state.status, 'warn');
+  assert.equal(await import('node:fs/promises').then(({ readFile }) => readFile(join(outbox, 'uncertain.json'), 'utf8')).then((value) => value.includes('uncertain')), true);
+  assert.equal(JSON.stringify(report).includes('private-conversation'), false);
+});
+
+test('state scanner strictly validates records and bounds entries without following symlinks', async () => {
+  let reads = 0;
+  const fsImpl = {
+    lstat: async (path) => {
+      if (path === 'root') return { isDirectory: () => true, isSymbolicLink: () => false };
+      if (path.endsWith('link.json')) return { isFile: () => true, isSymbolicLink: () => true };
+      return { isFile: () => true, isDirectory: () => false, isSymbolicLink: () => false, size: 20 };
+    },
+    readdir: async () => ['root/link.json', ...Array.from({ length: 1001 }, (_, index) => `record-${index}.json`)],
+    readFile: async (path) => { reads += 1; return JSON.stringify({ status: 'ready' }); }
+  };
+  const summary = await inspectStateDirectory('root', { kind: 'session', fsImpl });
+
+  assert.equal(summary.entries.truncated, true);
+  assert.equal(summary.records.invalid, 1000);
+  assert.equal(reads, 999);
+  assert.equal(summary.scan.status, 'warn');
+});
+
+test('doctor argument parser keeps old flags and accepts explicit probes', () => {
+  assert.deepEqual(parseDoctorArgs(['--json', '--capabilities', '--latest', '--models', '--harness', '{}']), {
+    checkCapabilities: true, json: true, help: false, latest: true, models: true, harness: '{}'
+  });
+});
+
+test('unresolved command configuration is redacted in offline and capability reports', async () => {
+  for (const variable of ['AGY_COMMAND', 'BUZZ_CLI_COMMAND']) {
+    for (const checkCapabilities of [false, true]) {
+      const marker = 'FAKE_DOCTOR_SECRET_9f1';
+      let spawned = 0;
+      const report = await runDoctor({ env: { [variable]: marker }, checkCapabilities,
+        fsImpl: { stat: async () => { throw Object.assign(new Error('missing'), { code: 'ENOENT' }); }, access: async () => {} },
+        spawnImpl: () => { spawned += 1; throw new Error('unresolved command must not execute'); } });
+      assert.equal(JSON.stringify(report).includes(marker), false);
+      assert.equal(spawned, 0);
+    }
+  }
+});
+
+test('state summary preserves a scan warning with no records', () => {
+  assert.equal(stateSummaryStatus({ scan: { status: 'warn' }, records: {}, locks: {}, entries: { truncated: false } }), 'warn');
 });

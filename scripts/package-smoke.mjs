@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
 import { mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -42,7 +43,7 @@ function runNpmPack(tempRoot, destinationName) {
 }
 
 async function main() {
-  const tempRoot = await mkdtemp(join(tmpdir(), 'agy-buzz-acp-package-smoke-'));
+  const tempRoot = await realpath(await mkdtemp(join(tmpdir(), 'agy-buzz-acp-package-smoke-')));
   const packDestination = await mkdtemp(join(repositoryRoot, '.package-smoke-'));
   const packDestinationName = basename(packDestination);
   const packageRoot = join(tempRoot, 'package');
@@ -101,8 +102,30 @@ async function main() {
     const catalog = JSON.parse(models.stdout);
     assert.equal(catalog.stable.configOptions[0].category, 'model');
     assert.equal(catalog.unstable.availableModels[0].modelId, 'fixture-model');
+
+    const harnessFile = join(tempRoot, 'harness.json');
+    const harnessBytes = JSON.stringify(harness, null, 2);
+    await writeFile(harnessFile, harnessBytes);
+    const configuredDoctor = runNode(packageRoot, 'bin/agy-buzz-doctor.js', ['--harness', harnessFile, '--json']);
+    assert.equal(configuredDoctor.status, 0, 'packaged harness diagnostic failed');
+    const configuredReport = JSON.parse(configuredDoctor.stdout);
+    assert.equal(configuredReport.harness.adapter.configuredVersion, packageJson.version);
+    const digest = createHash('sha256').update(await readFile(archive)).digest('hex');
+    const installArgs = ['install', '--archive', archive, '--sha256', digest,
+      '--root', join(tempRoot, 'runtime'), '--harness', harnessFile];
+    const installPlan = runNode(packageRoot, 'bin/agy-buzz-manage.js', installArgs);
+    assert.equal(installPlan.status, 0, 'packaged install planning failed');
+    assert.equal(await readFile(harnessFile, 'utf8'), harnessBytes, 'planning changed the harness');
+    const installed = runNode(packageRoot, 'bin/agy-buzz-manage.js', [...installArgs, '--apply']);
+    assert.equal(installed.status, 0, 'packaged install failed');
+    const installedReport = JSON.parse(installed.stdout);
+    const rollback = runNode(packageRoot, 'bin/agy-buzz-manage.js', [
+      'rollback', '--backup', installedReport.backupPath, '--harness', harnessFile, '--apply'
+    ]);
+    assert.equal(rollback.status, 0, 'packaged rollback failed');
+    assert.equal(await readFile(harnessFile, 'utf8'), harnessBytes, 'rollback did not restore the original configuration');
     console.log(JSON.stringify({ package: packageJson.name, version: packageJson.version,
-      archive: 'extracted', handshake: 'PASS', doctor: 'PASS', recovery: 'PASS', setup: 'PASS', models: 'PASS',
+      archive: 'extracted', handshake: 'PASS', doctor: 'PASS', recovery: 'PASS', setup: 'PASS', models: 'PASS', manage: 'PASS',
       providerCalls: 0, publications: 0 }));
   } finally {
     await rm(tempRoot, { recursive: true, force: true });

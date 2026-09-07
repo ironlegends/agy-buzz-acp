@@ -58,6 +58,10 @@ function sanitizeRecord(record) {
   return record;
 }
 
+export function validateSessionRecord(record) {
+  return sanitizeRecord(record);
+}
+
 export class SessionState {
   constructor({ dir, owner, relay, realpathFn = realpath, nowFn = () => new Date().toISOString() } = {}) {
     this.dir = typeof dir === 'string' && dir.trim() ? dir : null;

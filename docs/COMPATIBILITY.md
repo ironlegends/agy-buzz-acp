@@ -34,3 +34,7 @@ Those observations describe the earlier build, not automatic proof for a later r
 Use an operator-provisioned private local directory for optional persistence. On POSIX, verify owner and mode. On Windows, verify effective ACLs for the Buzz account; chmod-style modes alone are insufficient. Local state is plaintext. Do not synchronize it between machines or identities.
 
 A pending or uncertain operation is a recovery boundary, not evidence that nothing happened. Inspect actual provider/relay state before manual reconciliation. Never delete a lock or record merely to force an automatic retry.
+
+## Shutdown limitation in Buzz
+
+Durable recovery requires an orderly adapter shutdown. The Buzz shutdown path inspected for the local installation kills the ACP child without closing its stdin first. Even a successfully delivered turn can therefore leave a session lock behind and block the next launch. Do not enable durable state expecting automatic recovery from that shutdown path. A future integration must demonstrate lock cleanup after a delivered turn and restore the same conversation without replay or duplicate publication. Do not remove locks automatically to hide this limitation.
