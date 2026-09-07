@@ -150,6 +150,36 @@ test('accepts a bounded model override as one safe argv value', () => {
   session.close();
 });
 
+test('allows a catalog model before the first prompt and uses it for the provider', () => {
+  let invocation;
+  const child = fakeChild();
+  const session = new AgySession({
+    spawnFn: (command, args) => {
+      invocation = { command, args };
+      return child;
+    }
+  });
+  session.setModelCatalog([{ modelId: 'claude-4', name: 'Claude 4' }]);
+  assert.equal(session.setModel('claude-4'), 'claude-4');
+  session.ensureStarted();
+  assert.equal(invocation.args[invocation.args.indexOf('--model') + 1], 'claude-4');
+  session.close();
+});
+
+test('rejects unknown and post-start model changes without resetting the conversation', async () => {
+  const child = fakeChild();
+  const session = new AgySession({ spawnFn: () => child });
+  session.setModelCatalog([{ modelId: 'claude-4', name: 'Claude 4' }]);
+  assert.throws(() => session.setModel('gpt-5'), /not available/);
+  const turn = session.prompt('first', () => {});
+  assert.throws(() => session.setModel('claude-4'), /immutable/);
+  child.stdout.emit('data', JSON.stringify({ event: 'result', result: { status: 'SUCCESS', response: 'ok' } }) + '\n');
+  await turn;
+  assert.throws(() => session.setModel('claude-4'), /immutable/);
+  session.close();
+  assert.throws(() => session.setModel('claude-4'), /immutable/);
+});
+
 test('uses AGY_MODEL when no per-session model is provided', () => {
   const previous = process.env.AGY_MODEL;
   process.env.AGY_MODEL = 'gemini-from-env-v1';

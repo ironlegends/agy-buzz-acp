@@ -25,15 +25,20 @@ npm pack
 Install the generated archive, or an archive from a reviewed release:
 
 ```sh
-npm install --global ./agy-buzz-acp-0.2.0.tgz
+npm install --global ./agy-buzz-acp-0.3.0.tgz
 ```
 
 The package provides `agy-buzz-acp`, `agy-buzz-recover`, and `agy-buzz-doctor`. No npm dependencies are needed. No npm-registry publication is required to install the archive.
 
-In Buzz Settings, add a custom harness using an example from [examples](examples). Set the command to the absolute path of `node` and the argument to the installed `bin/agy-buzz-acp.js`. `npm root --global` shows the parent directory of the installed package. Use absolute paths for `AGY_COMMAND` and `BUZZ_CLI_COMMAND` when the Desktop process does not inherit your terminal PATH.
+Generate the custom harness settings using your actual installation paths:
 
-On Windows, point directly to `node.exe`, `agy.exe`, and `buzz.exe`. A `.cmd` or `.bat` npm shim is not an executable for a subprocess launched with `shell: false`. The adapter does not enable a shell to work around that restriction. On macOS/Linux, use the actual CLI executable paths.
+```sh
+agy-buzz-acp setup
+```
 
+The command searches your explicit `AGY_COMMAND` and `BUZZ_CLI_COMMAND` paths first, then PATH and documented standard installation locations. It prints JSON containing absolute Node, adapter, agy and Buzz paths. Copy these values into a custom harness in Buzz Settings. It does not install software, write application settings, authenticate, or include your credentials in the output.
+
+If an explicit path is wrong, correct it; the resolver will not silently use another installation. On Windows, select real executables such as `agy.exe` and `buzz.exe`, not `.cmd`/`.bat` shims. The adapter never enables a shell to launch a batch shim. For unusual installation layouts, use the [manual examples](examples).
 Run the doctor before selecting the runtime for an agent:
 
 ```sh
@@ -56,6 +61,19 @@ The default diagnostic is offline and does not log in, send messages, run provid
 
 Buzz supplies its own relay and managed identity environment. Do not copy another installation's credentials or embed them in custom harness examples. Optional state belongs to the local installation and identity.
 
+## Discover and select models
+
+```sh
+agy-buzz-acp models
+```
+
+This command queries the official `agy models` catalog and returns JSON usable by Buzz's model probe. Unlike `setup` and the default doctor, it can contact the provider using agy's existing authentication. It does not start a conversation, log in, or publish a message. Requests have bounded time and output; raw provider diagnostics are not printed.
+
+New ACP sessions expose the available models as select configuration options. The initial model remains `AGY_MODEL`, or `gemini-3.8-flash-high` by default. A client may choose an offered model with `session/set_config_option` before the first prompt. After a prompt starts, changing the model requires a new conversation. The adapter never resets an existing conversation to accommodate a model switch.
+
+Persisted conversations retain their model scope. Selecting a different model cannot restore old state under that new model; follow the explicit fresh-conversation procedure below if that is what you intend.
+
+If catalog discovery fails, the configured model remains usable and no model list is invented. Check the official CLI's installation and authentication separately. ACP `initialize`, CLI help/version, setup and offline doctor do not query the model catalog.
 ## Activity and delivery
 
 Activity Log distinguishes provider generation, available tool activity, and Buzz delivery. Activities carry unique IDs and available durations. Parameters, raw tool results, provider errors and hidden reasoning are not forwarded.
@@ -104,7 +122,8 @@ If an enabled outbox cannot write, the active adapter can retain a `mem_*` recov
 
 - Newline-delimited JSON-RPC 2.0 on stdio. Only protocol JSON is written to stdout.
 - `initialize` accepts ACP protocolVersion 1 or 2 and negotiates stable v1 semantics.
-- `session/new` requires an absolute working directory and creates an isolated session.
+- `session/new` requires an absolute working directory, creates an isolated session and advertises discovered model options when available.
+- `session/set_config_option` accepts the model choice only before the first prompt, using an ID offered by that session.
 - `session/prompt` accepts text blocks with a valid Buzz transport envelope. Both historical bracket markers and current XML markers are supported. The current Context block alone supplies the destination; duplicates and contradictory destinations are rejected before calling the provider.
 - `session/cancel` interrupts provider/publication work without replaying the prompt.
 - Images, audio, embedded context and bridging `mcpServers` are not supported. Provider-local tools remain governed by the provider's own configuration.

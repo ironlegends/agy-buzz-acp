@@ -1,6 +1,6 @@
 {
   "name": "agy-buzz-acp",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Minimal ACP stdio adapter for the official Antigravity CLI.",
   "type": "module",
   "bin": {
@@ -25,7 +25,10 @@
     "README.md",
     "src/session-state.js",
     "LICENSE",
-    "CONTRIBUTING.md"
+    "CONTRIBUTING.md",
+    "src/models.js",
+    "src/executables.js",
+    "src/setup.js"
   ],
   "scripts": {
     "test": "node --test",

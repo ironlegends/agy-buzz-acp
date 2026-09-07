@@ -172,6 +172,26 @@ test('Windows skips batch PATHEXT candidates and selects a later executable', as
   assert.match(report.commands.agy.path, /agy\.exe$/i);
 });
 
+test('offline doctor uses shared standard executable discovery', async () => {
+  const standard = 'C:\\Users\\tester\\AppData\\Local\\Buzz\\buzz.exe';
+  const report = await runDoctor({
+    env: { LOCALAPPDATA: 'C:\\Users\\tester\\AppData\\Local' },
+    platform: 'win32',
+    nodeVersion: '22.0.0',
+    fsImpl: {
+      stat: async (candidate) => {
+        if (candidate !== standard) throw new Error('missing');
+        return { isFile: () => true };
+      },
+      access: async () => {}
+    }
+  });
+
+  assert.equal(report.commands.buzz.status, 'pass');
+  assert.equal(report.commands.buzz.source, 'standard');
+  assert.equal(report.commands.buzz.path, standard);
+});
+
 test('durable session state requires a valid Buzz relay URL', async () => {
   const report = await runDoctor({
     env: {
@@ -258,6 +278,26 @@ test('unsupported Node versions fail before capability checks', async () => {
   assert.equal(report.ok, false);
   assert.equal(report.node.supported, false);
   assert.equal(spawnCalls, 0);
+});
+
+test('capability checks launch standard-location executables without PATH', async () => {
+  const agyPath = 'C:\\Users\\Example\\AppData\\Local\\agy\\bin\\agy.exe';
+  const buzzPath = 'C:\\Users\\Example\\AppData\\Local\\Buzz\\buzz.exe';
+  const available = new Set([agyPath, buzzPath]);
+  const commands = [];
+  const report = await runDoctor({
+    env: { LOCALAPPDATA: 'C:\\Users\\Example\\AppData\\Local', PATH: '' },
+    platform: 'win32', nodeVersion: '22.0.0', checkCapabilities: true,
+    fsImpl: { stat: async candidate => ({ isFile: () => available.has(candidate) }), access: async () => {} },
+    spawnImpl: command => {
+      commands.push(command);
+      const child = new EventEmitter();
+      queueMicrotask(() => child.emit('close', available.has(command) ? 0 : 1));
+      return child;
+    }
+  });
+  assert.equal(report.ok, true);
+  assert.deepEqual(commands, [agyPath, agyPath, buzzPath]);
 });
 
 test('capability checks are explicit, bounded, shell-free, and discard command output', async () => {

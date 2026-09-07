@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -13,13 +13,13 @@ const safeEnvironment = Object.fromEntries(
     .map((key) => [key, process.env[key]])
 );
 
-function runNode(packageRoot, entry, args = [], input = '') {
+function runNode(packageRoot, entry, args = [], input = '', envOverrides = {}) {
   const result = spawnSync(process.execPath, [join(packageRoot, entry), ...args], {
     cwd: packageRoot,
     input,
     encoding: 'utf8',
     timeout: timeoutMs,
-    env: safeEnvironment,
+    env: { ...safeEnvironment, ...envOverrides },
     shell: false,
     stdio: ['pipe', 'pipe', 'pipe']
   });
@@ -82,8 +82,28 @@ async function main() {
     const recovery = runNode(packageRoot, 'bin/agy-buzz-recover.js');
     assert.equal(recovery.status, 2, 'recovery usage smoke should fail closed with status 2');
     assert.match(recovery.stderr, /Usage: agy-buzz-recover/);
+
+    const setup = runNode(packageRoot, 'bin/agy-buzz-acp.js', ['setup'], '', {
+      AGY_COMMAND: process.execPath, BUZZ_CLI_COMMAND: process.execPath
+    });
+    assert.equal(setup.status, 0, 'packaged setup command failed');
+    const harness = JSON.parse(setup.stdout);
+    assert.equal(harness.command, process.execPath);
+    assert.equal(harness.args.length, 1);
+    assert.equal(await realpath(harness.args[0]), await realpath(join(packageRoot, 'bin', 'agy-buzz-acp.js')));
+
+    const fakeModels = join(tempRoot, 'fake-models.cjs');
+    await writeFile(fakeModels, "process.stdout.write('fixture-model\\tFixture Model\\n');\n");
+    const models = runNode(packageRoot, 'bin/agy-buzz-acp.js', ['models'], '', {
+      AGY_COMMAND: process.execPath, AGY_FAKE_SCRIPT: fakeModels, AGY_MODEL: 'fixture-model'
+    });
+    assert.equal(models.status, 0, 'packaged model catalog command failed');
+    const catalog = JSON.parse(models.stdout);
+    assert.equal(catalog.stable.configOptions[0].category, 'model');
+    assert.equal(catalog.unstable.availableModels[0].modelId, 'fixture-model');
     console.log(JSON.stringify({ package: packageJson.name, version: packageJson.version,
-      archive: 'extracted', handshake: 'PASS', doctor: 'PASS', recovery: 'PASS', providerCalls: 0, publications: 0 }));
+      archive: 'extracted', handshake: 'PASS', doctor: 'PASS', recovery: 'PASS', setup: 'PASS', models: 'PASS',
+      providerCalls: 0, publications: 0 }));
   } finally {
     await rm(tempRoot, { recursive: true, force: true });
     await rm(packDestination, { recursive: true, force: true });

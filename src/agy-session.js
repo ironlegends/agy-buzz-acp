@@ -93,6 +93,7 @@ export class AgySession {
     this.prefixArgs = prefixArgs;
     this.cwd = cwd;
     this.model = validateModel(model);
+    this.modelCatalog = Object.freeze([]);
     this.systemPrompt = typeof systemPrompt === 'string' && systemPrompt.trim() ? systemPrompt : null;
     this.sentSystemPrompt = false;
     this.spawnFn = spawnFn;
@@ -118,9 +119,11 @@ export class AgySession {
     this.turnIdsCoherent = true;
     this.turnSequence = 0;
     this.activityNonce = randomUUID().replaceAll('-', '');
+    this.closed = false;
   }
 
   prompt(text, onText, onActivity) {
+    if (this.closed) return Promise.reject(wrapperError('agy session is closed'));
     if (this.pending) return Promise.reject(wrapperError('session is busy'));
     if (this.contextLost) return Promise.reject(wrapperError(CONTEXT_LOST_MESSAGE));
     return new Promise((resolve, reject) => {
@@ -182,7 +185,7 @@ export class AgySession {
   }
 
   setTrustedConversation(conversationId) {
-    if (this.pending || this.child) throw wrapperError('agy conversation is already active');
+    if (this.closed || this.pending || this.child) throw wrapperError('agy conversation is already active');
     if (!validConversationId(conversationId)) throw wrapperError('agy trusted conversation id is invalid');
     if (this.conversationId && this.conversationId !== conversationId) {
       throw wrapperError('agy trusted conversation id mismatch');
@@ -214,7 +217,7 @@ export class AgySession {
       pending.started = true;
       pending.startedAt = this.childStartedAt ?? this.nowFn();
       pending.onActivity({ sessionUpdate: 'tool_call', toolCallId: `agy-${this.activityNonce}-provider-${pending.turnId}`,
-        title: 'Gemini generation', toolName: 'agy_provider', kind: 'other', status: 'in_progress', index: 0 });
+        title: 'Model generation', toolName: 'agy_provider', kind: 'other', status: 'in_progress', index: 0 });
     } catch {
       this.failResume(wrapperError('agy input failed'));
     }
@@ -239,6 +242,7 @@ export class AgySession {
   }
 
   close() {
+    this.closed = true;
     const child = this.child;
     this.child = null;
     this.sentSystemPrompt = false;
@@ -250,6 +254,31 @@ export class AgySession {
     this.buffer = '';
     this.childStartedAt = null;
     if (child) stopChild(child);
+  }
+
+  setModelCatalog(models) {
+    if (!Array.isArray(models)) throw wrapperError('agy model catalog is invalid');
+    const normalized = [];
+    const seen = new Set();
+    for (const candidate of models) {
+      if (!candidate || typeof candidate.modelId !== 'string' || typeof candidate.name !== 'string' ||
+          !/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/.test(candidate.modelId) || !candidate.name.trim() || seen.has(candidate.modelId)) continue;
+      seen.add(candidate.modelId);
+      normalized.push(Object.freeze({ modelId: candidate.modelId, name: candidate.name.trim() }));
+    }
+    this.modelCatalog = Object.freeze(normalized);
+  }
+
+  setModel(model) {
+    if (this.closed || this.pending || this.child || this.conversationEstablished || this.resumeEligible || this.contextLost) {
+      throw wrapperError('agy session model is immutable after start');
+    }
+    const selectedModel = validateModel(model);
+    if (!this.modelCatalog.some((candidate) => candidate.modelId === selectedModel)) {
+      throw wrapperError('agy model is not available in this session catalog');
+    }
+    this.model = selectedModel;
+    return this.model;
   }
 
   ensureStarted(resume = false) {
@@ -471,7 +500,7 @@ export class AgySession {
       ? (pending.startedAt === null ? null : (this.nowFn() - pending.startedAt) / 1000)
       : durationOverride;
     const update = { sessionUpdate: 'tool_call_update', toolCallId: `agy-${this.activityNonce}-provider-${pending.turnId}`,
-      title: 'Gemini generation', toolName: 'agy_provider', kind: 'other', status, index: 0 };
+      title: 'Model generation', toolName: 'agy_provider', kind: 'other', status, index: 0 };
     addDuration(update, duration);
     pending.onActivity(update);
     pending.providerTerminal = true;

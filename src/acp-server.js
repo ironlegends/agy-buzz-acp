@@ -7,6 +7,7 @@ import { BuzzPublisher } from './buzz-publisher.js';
 import { createConfiguredOutbox } from './delivery/outbox.js';
 import { getBuzzPublicKey } from './delivery/identity.js';
 import { createConfiguredSessionState } from './session-state.js';
+import { listModels, modelConfigOptions } from './models.js';
 
 const JSON_RPC = '2.0';
 
@@ -37,7 +38,7 @@ export function describePromptShape(prompt) {
   return `blocks=${prompt.length} ${blocks.join(' ; ')}`;
 }
 
-export function createAcpServer({ input = process.stdin, output = process.stdout, diagnostics = process.stderr, sessionFactory, publisherFactory, outboxFactory, identityFactory, sessionStateFactory } = {}) {
+export function createAcpServer({ input = process.stdin, output = process.stdout, diagnostics = process.stderr, sessionFactory, publisherFactory, outboxFactory, identityFactory, sessionStateFactory, modelCatalogFactory } = {}) {
   const sessions = new Map();
   const activeTurns = new Map();
   const recoveries = new Map();
@@ -48,6 +49,14 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
     command: process.env.AGY_COMMAND || 'agy',
     prefixArgs: process.env.AGY_FAKE_SCRIPT ? [process.env.AGY_FAKE_SCRIPT] : []
   }));
+  const modelCommand = process.env.AGY_COMMAND || 'agy';
+  const modelPrefixArgs = process.env.AGY_FAKE_SCRIPT ? [process.env.AGY_FAKE_SCRIPT] : [];
+  const getModelCatalog = modelCatalogFactory ?? ((options) => {
+    // Fixture providers are prompt-only and intentionally do not implement `models`.
+    // Keep those integration tests offline while the normal path probes agy lazily.
+    if (sessionFactory || process.env.AGY_FAKE_SCRIPT) return Promise.resolve([]);
+    return listModels(options);
+  });
   const makePublisher = publisherFactory ?? (() => new BuzzPublisher({
     command: process.env.BUZZ_CLI_COMMAND || 'buzz',
     prefixArgs: process.env.BUZZ_FAKE_SCRIPT ? [process.env.BUZZ_FAKE_SCRIPT] : []
@@ -96,7 +105,7 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
             promptCapabilities: { image: false, audio: false, embeddedContext: false },
             mcpCapabilities: { http: false, sse: false }
           },
-          agentInfo: { name: 'agy-buzz-acp', version: '0.2.0' }
+          agentInfo: { name: 'agy-buzz-acp', version: '0.3.0' }
         }));
         return;
       }
@@ -106,16 +115,60 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
           throw Object.assign(new Error('session cwd must be a non-empty absolute path'), { rpcCode: -32602 });
         }
         const sessionId = `ses_${randomUUID().replaceAll('-', '')}`;
+        if (Object.prototype.hasOwnProperty.call(params, 'model')) {
+          throw Object.assign(new Error('model override is not supported'), { rpcCode: -32602 });
+        }
+        const configuredModel = process.env.AGY_MODEL ?? 'gemini-3.8-flash-high';
+        let catalog;
+        try {
+          const result = await getModelCatalog({ command: modelCommand, cwd: params.cwd, prefixArgs: modelPrefixArgs });
+          catalog = Array.isArray(result) ? result : [];
+        } catch {
+          catalog = [];
+        }
+        catalog = Object.freeze(catalog.reduce((models, candidate) => {
+          if (candidate && typeof candidate.modelId === 'string' && typeof candidate.name === 'string' &&
+              /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/.test(candidate.modelId) && candidate.name.trim() &&
+              !models.some((model) => model.modelId === candidate.modelId)) {
+            models.push(Object.freeze({ modelId: candidate.modelId, name: candidate.name.trim() }));
+          }
+          return models;
+        }, []));
+        if (closing) throw Object.assign(new Error('agy adapter is closed'), { rpcCode: -32000, rpcMessage: 'agy adapter is closed' });
+        const requestedModel = configuredModel;
+        if (typeof requestedModel !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/.test(requestedModel)) {
+          throw Object.assign(new Error('model must be a non-empty bounded string'), { rpcCode: -32602 });
+        }
         // ACP transports MCP declarations here, but this adapter deliberately does not bridge or persist them.
         const systemPrompt = typeof params.systemPrompt === 'string' && params.systemPrompt.trim() ? params.systemPrompt : undefined;
         const session = makeSession({
           sessionId,
           cwd: params.cwd,
-          systemPrompt
+          systemPrompt,
+          model: requestedModel
         });
+        session.setModelCatalog?.(catalog);
         sessions.set(sessionId, { session, cwd: params.cwd,
-          model: process.env.AGY_MODEL ?? 'gemini-3.8-flash-high', bound: false, stateError: null });
-        if (id !== undefined) write(rpcResult(id, { sessionId }));
+          model: requestedModel, modelCatalog: catalog, bound: false, stateError: null });
+        if (id !== undefined) write(rpcResult(id, { sessionId, configOptions: modelConfigOptions(catalog, requestedModel) }));
+        return;
+      }
+      if (message.method === 'session/set_config_option') {
+        const entry = sessions.get(params.sessionId);
+        if (!entry) throw Object.assign(new Error('unknown session'), { rpcCode: -32001 });
+        if (activeTurns.has(params.sessionId)) throw Object.assign(new Error('session turn is busy'), { rpcCode: -32002 });
+        const configId = params.configId ?? params.id;
+        if (configId !== 'model') throw Object.assign(new Error('unknown config option'), { rpcCode: -32602 });
+        const value = params.value;
+        if (typeof value !== 'string' || !entry.modelCatalog.some((item) => item.modelId === value)) {
+          throw Object.assign(new Error('agy model is not available in this session catalog'), { rpcCode: -32602 });
+        }
+        if (typeof entry.session.setModel !== 'function') {
+          throw Object.assign(new Error('session model configuration is unavailable'), { rpcCode: -32603 });
+        }
+        entry.session.setModel(value);
+        entry.model = value;
+        if (id !== undefined) write(rpcResult(id, { configOptions: modelConfigOptions(entry.modelCatalog, value) }));
         return;
       }
       if (message.method === 'session/prompt') {

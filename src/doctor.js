@@ -1,10 +1,11 @@
 import { constants as fsConstants } from 'node:fs';
 import { access, stat } from 'node:fs/promises';
 import { spawn as nodeSpawn } from 'node:child_process';
-import { delimiter, isAbsolute, join } from 'node:path';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { executableCommandVariable, isBatchExecutablePath, resolveExecutable } from './executables.js';
 
-export const DOCTOR_VERSION = '0.2.0';
+export const DOCTOR_VERSION = '0.3.0';
 export const DEFAULT_TIMEOUT_MS = 3000;
 export const MAX_TIMEOUT_MS = 10000;
 export const NODE_MINIMUM_MAJOR = 20;
@@ -13,47 +14,8 @@ const SAFE_CHILD_ENV_KEYS = [
   'PATH', 'PATHEXT', 'SystemRoot', 'WINDIR', 'ComSpec', 'HOME', 'USERPROFILE', 'TMP', 'TEMP'
 ];
 const OWNER_RE = /^[0-9a-f]{64}$/i;
-const BATCH_EXTENSIONS = new Set(['.cmd', '.bat']);
-
 function hasValue(env, key) {
   return typeof env[key] === 'string' && env[key].trim().length > 0;
-}
-
-function commandUsesPath(command) {
-  return isAbsolute(command) || command.includes('/') || command.includes('\\');
-}
-
-function isBatchShim(command, platform) {
-  if (platform !== 'win32') return false;
-  const extension = command.slice(command.lastIndexOf('.')).toLowerCase();
-  return BATCH_EXTENSIONS.has(extension);
-}
-
-function commandCandidates(command, env, platform) {
-  if (commandUsesPath(command)) return [command];
-  const pathEntries = (env.PATH || '').split(delimiter).filter(Boolean);
-  if (platform !== 'win32') return pathEntries.map((entry) => join(entry, command));
-  const extensions = (env.PATHEXT || '.COM;.EXE;.BAT;.CMD').split(';').filter(Boolean)
-    .filter((extension) => !BATCH_EXTENSIONS.has(extension.toLowerCase()));
-  const names = command.includes('.') ? [command] : [command, ...extensions.map((extension) => `${command}${extension.toLowerCase()}`)];
-  return pathEntries.flatMap((entry) => names.map((name) => join(entry, name)));
-}
-
-async function inspectExecutable(command, env, platform, fsImpl) {
-  const candidates = commandCandidates(command, env, platform);
-  const rejected = isBatchShim(command, platform);
-  for (const candidate of candidates) {
-    if (isBatchShim(candidate, platform)) continue;
-    try {
-      const details = await fsImpl.stat(candidate);
-      if (!details.isFile()) continue;
-      if (platform !== 'win32') await fsImpl.access(candidate, fsConstants.X_OK);
-      return { found: true, path: candidate, rejected: false };
-    } catch {
-      // Continue through PATH candidates without exposing filesystem errors.
-    }
-  }
-  return { found: false, path: null, rejected };
 }
 
 function safeChildEnv(env) {
@@ -136,20 +98,22 @@ async function capabilityCheck(command, flag, { cwd, env, timeoutMs, spawnImpl }
 async function inspectCommand(id, variable, defaultCommand, { env, platform, fsImpl, checkCapabilities, cwd, timeoutMs, spawnImpl, nodeSupported }) {
   const configured = hasValue(env, variable);
   const command = configured ? env[variable].trim() : defaultCommand;
-  const executable = await inspectExecutable(command, env, platform, fsImpl);
-  let status = executable.rejected ? 'fail' : executable.found ? 'pass' : configured ? 'fail' : 'warn';
-  let message = executable.rejected
+  const name = variable === executableCommandVariable.agy ? 'agy' : 'buzz';
+  const executable = await resolveExecutable({ name, env, platform, fsImpl });
+  const rejected = configured && isBatchExecutablePath(command, platform);
+  let status = rejected ? 'fail' : executable ? 'pass' : configured ? 'fail' : 'warn';
+  let message = rejected
     ? `${variable} points to a Windows batch shim; configure an executable path for shell-free diagnostics`
-    : executable.found
+    : executable
     ? `${variable} resolves to ${executable.path}`
     : configured
       ? `${variable} is configured but ${command} was not found`
       : `${variable} is not configured; install or configure ${defaultCommand} before starting a session`;
   const capabilities = {};
-  if (checkCapabilities && nodeSupported && !executable.rejected) {
+  if (checkCapabilities && nodeSupported && !rejected) {
     const safeFlags = variable === 'BUZZ_CLI_COMMAND' ? ['--help'] : ['--version', '--help'];
     for (const flag of safeFlags) {
-      const result = await capabilityCheck(command, flag, { cwd, env, timeoutMs, spawnImpl });
+      const result = await capabilityCheck(executable?.path ?? command, flag, { cwd, env, timeoutMs, spawnImpl });
       capabilities[flag.slice(2)] = result;
       if (result.status === 'fail') {
         status = 'fail';
@@ -160,7 +124,7 @@ async function inspectCommand(id, variable, defaultCommand, { env, platform, fsI
       }
     }
   }
-  return { command, configured, path: executable.path, status, message, ...(checkCapabilities ? { capabilities } : {}) };
+  return { command, configured, path: executable?.path ?? null, source: executable?.source ?? null, status, message, ...(checkCapabilities ? { capabilities } : {}) };
 }
 
 async function inspectStore(env, directoryKey, ownerKey, label, fsImpl, platform) {

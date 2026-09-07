@@ -26,7 +26,10 @@ test('packages only the ACP runtime and required documentation', () => {
     'README.md',
     'src/session-state.js',
     'LICENSE',
-    'CONTRIBUTING.md'
+    'CONTRIBUTING.md',
+    'src/models.js',
+    'src/executables.js',
+    'src/setup.js'
   ]);
   const files = new Set(packageJson.files);
   for (const excluded of ['fixtures/fake-buzz.js', 'test/fixtures/fake-buzz.js', 'test']) {
