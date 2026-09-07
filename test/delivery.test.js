@@ -4,6 +4,7 @@ import { EventEmitter } from 'node:events';
 import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { parseBuzzContext } from '../src/buzz-context.js';
 import { BuzzPublisher } from '../src/buzz-publisher.js';
 import { DeliveryOutbox } from '../src/delivery/outbox.js';
@@ -13,8 +14,8 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
-const root = new URL('..', import.meta.url).pathname.replace(/^\//, '').replaceAll('/', '\\');
-const fakeBuzz = `${root}fixtures\\fake-buzz.js`;
+const root = fileURLToPath(new URL('..', import.meta.url));
+const fakeBuzz = join(root, 'fixtures', 'fake-buzz.js');
 
 const channelId = '11111111-1111-4111-8111-111111111111';
 const replyTo = 'a'.repeat(64);
@@ -285,7 +286,7 @@ test('recovery CLI verifies the current Buzz identity before retrying stored del
     const env = { ...process.env, AGY_OUTBOX_DIR: dir, AGY_OUTBOX_OWNER: owner,
       BUZZ_CLI_COMMAND: process.execPath, BUZZ_FAKE_SCRIPT: fakeBuzz, BUZZ_SELF_PUBKEY: owner,
       BUZZ_CALLS_FILE: join(dir, 'calls.txt') };
-    const cli = `${root}bin\\agy-buzz-recover.js`;
+    const cli = join(root, 'bin', 'agy-buzz-recover.js');
     const listed = await execFileAsync(process.execPath, [cli, 'list'], { env });
     assert.match(listed.stdout, /cli-test/);
     const shown = await execFileAsync(process.execPath, [cli, 'show', 'cli-test'], { env });
