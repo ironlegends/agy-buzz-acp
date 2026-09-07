@@ -38,10 +38,10 @@ test('session/new exposes the fetched catalog and config aliases', async () => {
     })
   });
   await server.handle({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: 1 } });
-  await server.handle({ jsonrpc: '2.0', id: 2, method: 'session/new', params: { cwd: 'C:\\work' } });
+  await server.handle({ jsonrpc: '2.0', id: 2, method: 'session/new', params: { cwd: process.cwd() } });
   const created = messages.find((message) => message.id === 2);
   assert.equal(seen.length, 1);
-  assert.equal(seen[0].cwd, 'C:\\work');
+  assert.equal(seen[0].cwd, process.cwd());
   assert.equal(created.result.configOptions[0].currentValue, 'gemini-3.8-flash-high');
   assert.equal(created.result.configOptions[0].category, 'model');
   assert.deepEqual(created.result.configOptions[0].options[1], {
@@ -61,7 +61,7 @@ test('set_config_option changes only a known prestart model', async () => {
     }
   });
   await server.handle({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: 1 } });
-  await server.handle({ jsonrpc: '2.0', id: 2, method: 'session/new', params: { cwd: 'C:\\work' } });
+  await server.handle({ jsonrpc: '2.0', id: 2, method: 'session/new', params: { cwd: process.cwd() } });
   const sessionId = messages.find((message) => message.id === 2).result.sessionId;
   await server.handle({ jsonrpc: '2.0', id: 3, method: 'session/set_config_option', params: { sessionId, configId: 'model', value: 'claude-4' } });
   assert.equal(messages.find((message) => message.id === 3).result.configOptions[0].currentValue, 'claude-4');
@@ -77,7 +77,7 @@ test('catalog failure leaves configured model usable without invented options', 
     sessionFactory: (options) => ({ options, setModelCatalog() {}, close() {} })
   });
   await server.handle({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: 1 } });
-  await server.handle({ jsonrpc: '2.0', id: 2, method: 'session/new', params: { cwd: 'C:\\work' } });
+  await server.handle({ jsonrpc: '2.0', id: 2, method: 'session/new', params: { cwd: process.cwd() } });
   const created = messages.find((message) => message.id === 2);
   assert.equal(created.result.configOptions.length, 0);
   assert.equal(created.result.sessionId.startsWith('ses_'), true);
@@ -91,7 +91,7 @@ test('session/new rejects a model override before provider discovery', async () 
     sessionFactory: () => ({ close() {} })
   });
   await server.handle({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: 1 } });
-  await server.handle({ jsonrpc: '2.0', id: 2, method: 'session/new', params: { cwd: 'C:\\work', model: 'claude-4' } });
+  await server.handle({ jsonrpc: '2.0', id: 2, method: 'session/new', params: { cwd: process.cwd(), model: 'claude-4' } });
   assert.equal(messages.find((message) => message.id === 2).error.code, -32602);
   assert.equal(queried, false);
   await server.close();
