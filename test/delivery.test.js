@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, rmdir, symlink, unlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -274,6 +274,19 @@ test('rejects a partially configured outbox instead of silently dropping recover
   const outbox = new DeliveryOutbox({ dir: 'C:/private/agy-outbox', owner: 'invalid-owner' });
   assert.match(outbox.configurationError, /AGY_OUTBOX_DIR and AGY_OUTBOX_OWNER/);
   assert.equal(outbox.enabled, false);
+});
+
+test('runs the recovery CLI through a directory alias', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'agy-recovery-alias-'));
+  const alias = join(dir, 'adapter');
+  try {
+    await symlink(root, alias, process.platform === 'win32' ? 'junction' : 'dir');
+    await assert.rejects(execFileAsync(process.execPath, [join(alias, 'bin', 'agy-buzz-recover.js')]),
+      (error) => error.code === 2 && error.stderr.includes('Usage: agy-buzz-recover'));
+  } finally {
+    await unlink(alias).catch((error) => { if (error.code !== 'ENOENT') throw error; });
+    await rmdir(dir);
+  }
 });
 
 test('recovery CLI verifies the current Buzz identity before retrying stored delivery', async () => {

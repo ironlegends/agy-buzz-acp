@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { fileURLToPath } from 'node:url';
+import { realpathSync } from 'node:fs';
 import { BuzzPublisher } from '../src/buzz-publisher.js';
 import { createConfiguredOutbox } from '../src/delivery/outbox.js';
 import { getBuzzPublicKey } from '../src/delivery/identity.js';
@@ -47,7 +48,13 @@ export async function runRecoveryCli(argv, env = process.env, stdout = process.s
   return result;
 }
 
-if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+function isEntrypoint() {
+  if (!process.argv[1]) return false;
+  try { return realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url)); }
+  catch { return false; }
+}
+
+if (isEntrypoint()) {
   runRecoveryCli(process.argv.slice(2)).catch((error) => {
     process.stderr.write(`[agy-buzz-recover] ${error.message}\n`);
     process.exitCode = 2;
