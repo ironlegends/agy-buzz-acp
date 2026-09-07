@@ -1,0 +1,318 @@
+import { randomUUID } from 'node:crypto';
+import { isAbsolute } from 'node:path';
+import { promptToText } from './prompt.js';
+import { AgySession } from './agy-session.js';
+import { parseBuzzContext } from './buzz-context.js';
+import { BuzzPublisher } from './buzz-publisher.js';
+import { createConfiguredOutbox } from './delivery/outbox.js';
+import { getBuzzPublicKey } from './delivery/identity.js';
+import { createConfiguredSessionState } from './session-state.js';
+
+const JSON_RPC = '2.0';
+
+function rpcResult(id, result) {
+  return { jsonrpc: JSON_RPC, id, result };
+}
+
+function rpcError(id, code, message) {
+  return { jsonrpc: JSON_RPC, id: id ?? null, error: { code, message } };
+}
+
+const CONTEXT_PROBE_MARKERS = [
+  '[Base]', '[Context]', '[Thread Context', '[Buzz event:', '[Buzz events',
+  '<base>', '<context>', '<thread-context', '<buzz-event'
+];
+
+// Structural shape only: block count, block sizes, and marker presence. No message
+// bodies, identifiers or secrets are emitted.
+export function describePromptShape(prompt) {
+  if (!Array.isArray(prompt)) return `notArray type=${typeof prompt}`;
+  const blocks = prompt.map((block, index) => {
+    if (!block || typeof block !== 'object') return `${index}:nonObject`;
+    if (block.type !== 'text' || typeof block.text !== 'string') return `${index}:type=${String(block.type)}`;
+    const starts = CONTEXT_PROBE_MARKERS.filter((marker) => block.text.startsWith(marker)).join('|') || 'none';
+    const contains = CONTEXT_PROBE_MARKERS.filter((marker) => block.text.includes(marker)).join('|') || 'none';
+    return `${index}:len=${block.text.length}:startsWith=${starts}:contains=${contains}`;
+  });
+  return `blocks=${prompt.length} ${blocks.join(' ; ')}`;
+}
+
+export function createAcpServer({ input = process.stdin, output = process.stdout, diagnostics = process.stderr, sessionFactory, publisherFactory, outboxFactory, identityFactory, sessionStateFactory } = {}) {
+  const sessions = new Map();
+  const activeTurns = new Map();
+  const recoveries = new Map();
+  const recoveryClaims = new Set();
+  const channelSessions = new Map();
+  const activeHandles = new Set();
+  const makeSession = sessionFactory ?? ((options) => new AgySession({ ...options,
+    command: process.env.AGY_COMMAND || 'agy',
+    prefixArgs: process.env.AGY_FAKE_SCRIPT ? [process.env.AGY_FAKE_SCRIPT] : []
+  }));
+  const makePublisher = publisherFactory ?? (() => new BuzzPublisher({
+    command: process.env.BUZZ_CLI_COMMAND || 'buzz',
+    prefixArgs: process.env.BUZZ_FAKE_SCRIPT ? [process.env.BUZZ_FAKE_SCRIPT] : []
+  }));
+  const outbox = outboxFactory ? outboxFactory() : createConfiguredOutbox();
+  const sessionState = sessionStateFactory ? sessionStateFactory() : createConfiguredSessionState();
+  const makeIdentity = identityFactory ?? (() => getBuzzPublicKey({
+    command: process.env.BUZZ_CLI_COMMAND || 'buzz',
+    prefixArgs: process.env.BUZZ_FAKE_SCRIPT ? [process.env.BUZZ_FAKE_SCRIPT] : []
+  }));
+  let publisher;
+  let initialized = false;
+  let closing = false;
+  let buffer = '';
+
+  const write = (message) => output.write(`${JSON.stringify(message)}\n`);
+  const report = (message) => diagnostics.write(`[agy-buzz-acp] ${message}\n`);
+  const emitActivity = (sessionId, update) => write({
+    jsonrpc: JSON_RPC,
+    method: 'session/update',
+    params: { sessionId, update }
+  });
+  const emitDeliveryDiagnostic = (sessionId, status, recoveryId) => write({
+    jsonrpc: JSON_RPC,
+    method: 'session/update',
+    params: { sessionId, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: `[Delivery status] ${status}${recoveryId ? `; recovery ${recoveryId}` : ''}` } } }
+  });
+
+  async function handle(message) {
+    const id = message.id;
+    if (message.jsonrpc !== JSON_RPC || typeof message.method !== 'string') {
+      if (id !== undefined) write(rpcError(id, -32600, 'invalid JSON-RPC request'));
+      return;
+    }
+    const params = message.params && typeof message.params === 'object' ? message.params : {};
+    try {
+      if (closing) throw Object.assign(new Error('agy adapter is closed'), { rpcCode: -32000, rpcMessage: 'agy adapter is closed' });
+      if (message.method === 'initialize') {
+        if (![1, 2].includes(params.protocolVersion)) throw Object.assign(new Error('unsupported ACP protocol version'), { rpcCode: -32602 });
+        initialized = true;
+        const negotiatedVersion = 1;
+        if (id !== undefined) write(rpcResult(id, {
+          protocolVersion: negotiatedVersion,
+          agentCapabilities: {
+            loadSession: false,
+            promptCapabilities: { image: false, audio: false, embeddedContext: false },
+            mcpCapabilities: { http: false, sse: false }
+          },
+          agentInfo: { name: 'agy-buzz-acp', version: '0.2.0' }
+        }));
+        return;
+      }
+      if (!initialized) throw Object.assign(new Error('initialize is required'), { rpcCode: -32000 });
+      if (message.method === 'session/new') {
+        if (typeof params.cwd !== 'string' || !params.cwd.trim() || !isAbsolute(params.cwd)) {
+          throw Object.assign(new Error('session cwd must be a non-empty absolute path'), { rpcCode: -32602 });
+        }
+        const sessionId = `ses_${randomUUID().replaceAll('-', '')}`;
+        // ACP transports MCP declarations here, but this adapter deliberately does not bridge or persist them.
+        const systemPrompt = typeof params.systemPrompt === 'string' && params.systemPrompt.trim() ? params.systemPrompt : undefined;
+        const session = makeSession({
+          sessionId,
+          cwd: params.cwd,
+          systemPrompt
+        });
+        sessions.set(sessionId, { session, cwd: params.cwd,
+          model: process.env.AGY_MODEL ?? 'gemini-3.8-flash-high', bound: false, stateError: null });
+        if (id !== undefined) write(rpcResult(id, { sessionId }));
+        return;
+      }
+      if (message.method === 'session/prompt') {
+        if (Object.prototype.hasOwnProperty.call(params, 'model')) throw Object.assign(new Error('model override is not supported'), { rpcCode: -32602 });
+        const entry = sessions.get(params.sessionId);
+        if (!entry) throw Object.assign(new Error('unknown session'), { rpcCode: -32001 });
+        const session = entry.session;
+        if (activeTurns.has(params.sessionId)) throw Object.assign(new Error('session turn is busy'), { rpcCode: -32002 });
+        const text = promptToText(params.prompt);
+        report(`session/prompt blocks=${Array.isArray(params.prompt) ? params.prompt.length : 0}`);
+        const buzzContext = parseBuzzContext(params.prompt);
+        if (!buzzContext) {
+          report(`context parse failed ${describePromptShape(params.prompt)}`);
+          throw Object.assign(new Error('Buzz transport context unavailable'), { rpcCode: -32603, rpcMessage: 'Buzz transport context unavailable' });
+        }
+        if (entry.channelId && entry.channelId !== buzzContext.channelId) {
+          throw Object.assign(new Error('agy session channel scope cannot change'), { rpcCode: -32602, rpcMessage: 'agy session channel scope cannot change' });
+        }
+        entry.channelId ??= buzzContext.channelId;
+        const controller = new AbortController();
+        activeTurns.set(params.sessionId, controller);
+        let stateScope = null;
+        try {
+          if (sessionState?.configurationError) {
+            throw Object.assign(new Error(sessionState.configurationError), { rpcCode: -32602, rpcMessage: sessionState.configurationError });
+          }
+          if (sessionState?.enabled) {
+            if (entry.stateError) throw Object.assign(new Error(entry.stateError), { rpcCode: -32603, rpcMessage: entry.stateError });
+            await sessionState.verifyIdentity(makeIdentity);
+            stateScope = await sessionState.scope({ channelId: buzzContext.channelId, cwd: entry.cwd, model: entry.model });
+            const existingSessionId = channelSessions.get(buzzContext.channelId);
+            if (existingSessionId && existingSessionId !== params.sessionId) {
+              throw Object.assign(new Error('agy channel session is already owned'), { rpcCode: -32002, rpcMessage: 'agy channel session is already owned' });
+            }
+            channelSessions.set(buzzContext.channelId, params.sessionId);
+            if (!entry.bound) {
+              const saved = await sessionState.load(stateScope);
+              if (saved) session.setTrustedConversation?.(saved.conversationId);
+              entry.bound = true;
+            }
+            await sessionState.invalidate(stateScope);
+          }
+          if (outbox?.configurationError) {
+            throw Object.assign(new Error(outbox.configurationError), { rpcCode: -32602, rpcMessage: outbox.configurationError });
+          }
+          publisher ??= makePublisher();
+          if (!publisher || typeof publisher.publish !== 'function') throw Object.assign(new Error('Buzz publisher unavailable'), { rpcCode: -32603, rpcMessage: 'Buzz publisher unavailable' });
+          if (controller.signal.aborted) throw Object.assign(new Error('prompt cancelled'), { code: 'CANCELLED' });
+        } catch (error) {
+          activeTurns.delete(params.sessionId);
+          if (channelSessions.get(buzzContext.channelId) === params.sessionId) channelSessions.delete(buzzContext.channelId);
+          throw error;
+        }
+        const toolCallId = `delivery_${randomUUID().replaceAll('-', '')}`;
+        const deliveryActivity = (sessionUpdate, title, status, content = title) => emitActivity(params.sessionId, {
+          sessionUpdate,
+          toolCallId,
+          toolName: 'buzz_delivery',
+          title,
+          kind: 'other',
+          status,
+          content: [{ type: 'content', content: { type: 'text', text: content } }]
+        });
+        try {
+          const response = await session.prompt(text, (delta) => write({
+            jsonrpc: JSON_RPC,
+            method: 'session/update',
+            params: { sessionId: params.sessionId, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: delta } } }
+          }), (update) => {
+            if (update && typeof update === 'object') emitActivity(params.sessionId, update);
+          });
+          deliveryActivity('tool_call', 'Response produced', 'pending');
+          let recoveryId = null;
+          let durabilityFailed = false;
+          try { recoveryId = await outbox?.begin({ ...buzzContext, content: response }); }
+          catch (error) {
+            durabilityFailed = Boolean(outbox?.enabled);
+            recoveryId = `mem_${randomUUID().replaceAll('-', '')}`;
+            recoveries.set(recoveryId, { ...buzzContext, content: response, owner: outbox?.owner, status: 'failed-before-start' });
+            report(`outbox prepare failed code=${error?.code ?? 'unknown'} recovery=${recoveryId}`);
+          }
+          if (durabilityFailed) {
+            const delivery = { status: 'failed-before-start', recoveryId };
+            deliveryActivity('tool_call_update', 'Publication failed', 'failed', `Publication failed; recovery ${recoveryId}`);
+            emitDeliveryDiagnostic(params.sessionId, delivery.status, recoveryId);
+            if (id !== undefined) write(rpcResult(id, { stopReason: 'end_turn', publication: delivery }));
+            return;
+          }
+          deliveryActivity('tool_call_update', 'Publication in progress', 'in_progress');
+          let publication;
+          try { publication = await publisher.publish({ ...buzzContext, content: response }, controller.signal); }
+          catch (error) {
+            publication = error?.publicationStatus ? { status: error.publicationStatus } : { status: 'uncertain', code: error?.code };
+          }
+          if (!publication || typeof publication !== 'object') publication = { status: 'uncertain' };
+          const status = ['sent', 'failed-before-start', 'uncertain'].includes(publication.status) ? publication.status : 'uncertain';
+          if (recoveryId) {
+            try { await outbox.update(recoveryId, { status, ...(publication.eventId ? { eventId: publication.eventId } : {}) }); }
+            catch (error) { report(`outbox update failed code=${error?.code ?? 'unknown'} recovery=${recoveryId}`); }
+          }
+          const delivery = { status, ...(publication.eventId ? { eventId: publication.eventId } : {}), ...(recoveryId ? { recoveryId } : {}) };
+          if (status === 'sent') deliveryActivity('tool_call_update', 'Response sent', 'completed');
+          else if (status === 'failed-before-start') deliveryActivity('tool_call_update', 'Publication failed', 'failed', `Publication failed; recovery ${recoveryId ?? 'unavailable'}`);
+          else deliveryActivity('tool_call_update', 'Delivery uncertain', 'failed', `Delivery uncertain; recovery ${recoveryId ?? 'unavailable'}`);
+          if (status === 'sent' && stateScope && sessionState?.enabled) {
+            try {
+              const conversationId = session.getConversationId?.();
+              if (conversationId && session.hasConfirmedConversation?.()) {
+                await sessionState.save(stateScope, conversationId);
+              }
+            } catch (error) {
+              entry.stateError = 'agy session association could not be saved';
+              report('session association could not be saved');
+            }
+          }
+          if (status !== 'sent') {
+            report(`publication ${status}${recoveryId ? ` recovery=${recoveryId}` : ''}`);
+            emitDeliveryDiagnostic(params.sessionId, status, recoveryId);
+          }
+          if (controller.signal.aborted || publication.code === 'CANCELLED') {
+            if (id !== undefined) write(rpcResult(id, { stopReason: 'cancelled', publication: delivery }));
+          } else if (id !== undefined) {
+            write(rpcResult(id, { stopReason: 'end_turn', publication: delivery }));
+          }
+        } finally {
+          activeTurns.delete(params.sessionId);
+        }
+        return;
+      }
+      if (message.method === 'session/cancel') {
+        activeTurns.get(params.sessionId)?.abort();
+        sessions.get(params.sessionId)?.session?.cancel();
+        return;
+      }
+      if (id !== undefined) write(rpcError(id, -32601, 'method not found'));
+    } catch (error) {
+      if (id === undefined) return;
+      if (error?.code === 'CANCELLED') write(rpcResult(id, { stopReason: 'cancelled' }));
+      else {
+        const code = error?.rpcCode ?? (error instanceof TypeError ? -32602 : -32603);
+        const message = error?.rpcMessage ?? (code === -32602 ? error.message : 'provider request failed');
+        if (message === 'provider request failed') report('provider request failed');
+        write(rpcError(id, code, message));
+      }
+    }
+  }
+
+  input.setEncoding('utf8');
+  input.on('data', (chunk) => {
+    buffer += chunk;
+    let index;
+    while ((index = buffer.indexOf('\n')) >= 0) {
+      const line = buffer.slice(0, index);
+      buffer = buffer.slice(index + 1);
+      if (!line.trim()) continue;
+      let message;
+      try { message = JSON.parse(line); }
+      catch { report('invalid JSON input'); write(rpcError(null, -32700, 'parse error')); continue; }
+      const task = handle(message);
+      activeHandles.add(task);
+      void task.finally(() => activeHandles.delete(task));
+    }
+  });
+  let closePromise = null;
+  async function close() {
+    if (closePromise) return closePromise;
+    closePromise = (async () => {
+    closing = true;
+    for (const controller of activeTurns.values()) controller.abort();
+    for (const entry of sessions.values()) entry.session.close?.();
+    await Promise.allSettled([...activeHandles]);
+    await Promise.allSettled([...sessions.values()].map((entry) => entry.session.waitForClose?.()));
+    await sessionState?.release?.();
+    })();
+    return closePromise;
+  }
+  input.on('end', () => { void close(); });
+  async function retryDelivery(recoveryId) {
+    const record = recoveries.get(recoveryId);
+    if (!record || record.status !== 'failed-before-start') return { status: 'blocked' };
+    if (recoveryClaims.has(recoveryId)) return { status: 'blocked', reason: 'busy' };
+    recoveryClaims.add(recoveryId);
+    try {
+      let owner;
+      try { owner = await makeIdentity(); } catch { return { status: 'blocked', reason: 'owner-mismatch' }; }
+      if (!owner || owner !== outbox?.owner || owner !== record.owner) return { status: 'blocked', reason: 'owner-mismatch' };
+      if (recoveries.get(recoveryId) !== record || record.status !== 'failed-before-start') return { status: 'blocked', reason: 'busy' };
+      record.status = 'uncertain';
+      let publication;
+      try { publication = await publisher.publish({ channelId: record.channelId, replyTo: record.replyTo, content: record.content }); }
+      catch { publication = { status: 'uncertain' }; }
+      const status = ['sent', 'failed-before-start', 'uncertain'].includes(publication?.status) ? publication.status : 'uncertain';
+      record.status = status;
+      return { status, ...(publication?.eventId ? { eventId: publication.eventId } : {}) };
+    } finally {
+      recoveryClaims.delete(recoveryId);
+    }
+  }
+  return { handle, sessions, recoveries, retryDelivery, close };
+}

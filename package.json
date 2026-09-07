@@ -1,0 +1,45 @@
+{
+  "name": "agy-buzz-acp",
+  "version": "0.2.0",
+  "description": "Minimal ACP stdio adapter for the official Antigravity CLI.",
+  "type": "module",
+  "bin": {
+    "agy-buzz-acp": "bin/agy-buzz-acp.js",
+    "agy-buzz-recover": "bin/agy-buzz-recover.js",
+    "agy-buzz-doctor": "bin/agy-buzz-doctor.js"
+  },
+  "files": [
+    "bin/agy-buzz-acp.js",
+    "bin/agy-buzz-recover.js",
+    "bin/agy-buzz-doctor.js",
+    "src/acp-server.js",
+    "src/agy-session.js",
+    "src/prompt.js",
+    "src/buzz-context.js",
+    "src/buzz-publisher.js",
+    "src/delivery/outbox.js",
+    "src/delivery/identity.js",
+    "src/doctor.js",
+    "docs",
+    "examples",
+    "README.md",
+    "src/session-state.js",
+    "LICENSE",
+    "CONTRIBUTING.md"
+  ],
+  "scripts": {
+    "test": "node --test",
+    "check": "node --test && npm pack --dry-run"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT",
+  "repository": {
+    "url": "git+https://github.com/ironlegends/agy-buzz-acp.git",
+    "type": "git"
+  },
+  "bugs": {
+    "url": "https://github.com/ironlegends/agy-buzz-acp/issues"
+  }
+}

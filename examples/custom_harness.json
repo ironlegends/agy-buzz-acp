@@ -1,0 +1,10 @@
+{
+  "id": "agy-gemini-38-flash-high",
+  "label": "Antigravity Gemini 3.8 Flash High",
+  "command": "node",
+  "args": ["<adapter-root>/bin/agy-buzz-acp.js"],
+  "env": {
+    "AGY_COMMAND": "agy",
+    "BUZZ_CLI_COMMAND": "buzz"
+  }
+}

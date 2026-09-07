@@ -1,0 +1,11 @@
+{
+  "id": "agy-buzz-acp-linux",
+  "label": "agy-buzz-acp on Linux",
+  "command": "node",
+  "args": ["/opt/agy-buzz-acp/bin/agy-buzz-acp.js"],
+  "env": {
+    "AGY_COMMAND": "/opt/agy/bin/agy",
+    "BUZZ_CLI_COMMAND": "/opt/buzz/bin/buzz"
+  },
+  "doctor": "node /opt/agy-buzz-acp/bin/agy-buzz-doctor.js"
+}

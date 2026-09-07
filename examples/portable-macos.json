@@ -1,0 +1,11 @@
+{
+  "id": "agy-buzz-acp-macos",
+  "label": "agy-buzz-acp on macOS",
+  "command": "node",
+  "args": ["/usr/local/opt/agy-buzz-acp/bin/agy-buzz-acp.js"],
+  "env": {
+    "AGY_COMMAND": "/usr/local/bin/agy",
+    "BUZZ_CLI_COMMAND": "/usr/local/bin/buzz"
+  },
+  "doctor": "node /usr/local/opt/agy-buzz-acp/bin/agy-buzz-doctor.js"
+}

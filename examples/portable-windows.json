@@ -1,0 +1,11 @@
+{
+  "id": "agy-buzz-acp-windows",
+  "label": "agy-buzz-acp on Windows",
+  "command": "node",
+  "args": ["C:\\path\\to\\agy-buzz-acp\\bin\\agy-buzz-acp.js"],
+  "env": {
+    "AGY_COMMAND": "C:\\path\\to\\agy.exe",
+    "BUZZ_CLI_COMMAND": "C:\\path\\to\\buzz.exe"
+  },
+  "doctor": "node C:\\path\\to\\agy-buzz-acp\\bin\\agy-buzz-doctor.js"
+}

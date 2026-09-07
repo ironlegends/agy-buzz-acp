@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "buzz": {
+      "command": "buzz-dev-mcp",
+      "args": []
+    }
+  }
+}
