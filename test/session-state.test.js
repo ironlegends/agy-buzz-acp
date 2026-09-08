@@ -4,8 +4,23 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
+import { EventEmitter } from 'node:events';
 import { createAcpServer } from '../src/acp-server.js';
 import { SessionState } from '../src/session-state.js';
+import { BuzzPublisher } from '../src/buzz-publisher.js';
+import { DeliveryOutbox } from '../src/delivery/outbox.js';
+
+function fakeChild() {
+  const child = new EventEmitter();
+  child.stdout = new EventEmitter();
+  child.stdout.setEncoding = () => {};
+  child.stdin = new EventEmitter();
+  child.stdin.writes = [];
+  child.stdin.write = (value) => { child.stdin.writes.push(value); return true; };
+  child.stdin.end = () => { child.stdin.ended = true; };
+  child.kill = () => { child.killed = true; };
+  return child;
+}
 
 const owner = 'ab'.repeat(32);
 const channelId = '123e4567-e89b-12d3-a456-426614174000';
@@ -231,41 +246,133 @@ test('does not persist an unconfirmed terminal conversation after an orderly clo
 
 test('terminally blocks an ACP entry after uncertain publication before the next external effect', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'agy-session-uncertain-'));
+  const outboxDir = await mkdtemp(join(tmpdir(), 'agy-session-outbox-'));
   const input = new PassThrough();
   const output = new PassThrough();
   const diagnostics = new PassThrough();
   const state = new SessionState({ dir, owner, relay: 'wss://relay.example.test' });
-  const publications = [];
+  const outbox = new DeliveryOutbox({ dir: outboxDir, owner, idFn: () => 'state-uncertain-1' });
+
+  let publishAttempts = 0;
+  let ambiguousEffects = 0;
   let promptCalls = 0;
   let wire = '';
   output.setEncoding('utf8');
   output.on('data', (chunk) => { wire += chunk; });
-  const server = createAcpServer({ input, output, diagnostics, sessionStateFactory: () => state,
+
+  const publisher = new BuzzPublisher({
+    spawnFn: (_command, args) => {
+      publishAttempts += 1;
+      const child = fakeChild();
+      child.spawnArgs = args;
+      const origEnd = child.stdin.end;
+      child.stdin.end = () => {
+        origEnd();
+        ambiguousEffects += 1;
+        setImmediate(() => {
+          child.emit('spawn');
+          child.emit('close', 1);
+        });
+      };
+      return child;
+    }
+  });
+
+  const server = createAcpServer({
+    input, output, diagnostics,
+    sessionStateFactory: () => state,
+    outboxFactory: () => outbox,
     identityFactory: async () => owner,
     sessionFactory: () => ({
       prompt: async () => { promptCalls += 1; return 'answer'; },
-      getConversationId: () => 'conversation-1', hasConfirmedConversation: () => true,
+      getConversationId: () => 'conversation-1',
+      hasConfirmedConversation: () => true,
       cancel() {}, close() {}
     }),
-    publisherFactory: () => ({ publish: async (message) => { publications.push(message); return { status: 'uncertain' }; } })
+    publisherFactory: () => publisher
   });
+
   try {
     await server.handle({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: 1 } });
     await server.handle({ jsonrpc: '2.0', id: 2, method: 'session/new', params: { cwd: dir } });
     const sessionId = [...server.sessions.keys()][0];
-    await server.handle({ jsonrpc: '2.0', id: 3, method: 'session/prompt', params: { sessionId, prompt } });
-    assert.equal(promptCalls, 1);
-    assert.equal(publications.length, 1);
-    assert.equal((JSON.parse(await readFile(state.path(channelId), 'utf8'))).status, 'blocked');
 
+    // First turn
+    await server.handle({ jsonrpc: '2.0', id: 3, method: 'session/prompt', params: { sessionId, prompt } });
+
+    // Step 2 assertions:
+    const firstResponse = wire.trim().split('\n').map((line) => JSON.parse(line)).find((m) => m.id === 3);
+    assert.ok(firstResponse, 'must produce response for id 3');
+    assert.equal(firstResponse.result.publication.status, 'uncertain');
+    assert.equal(firstResponse.result.publication.recoveryId, 'state-uncertain-1');
+
+    assert.equal(promptCalls, 1, 'provider prompts counter must equal 1');
+    assert.equal(publishAttempts, 1, 'publication attempts counter must equal 1');
+    assert.equal(ambiguousEffects, 1, 'ambiguous effects counter must equal 1');
+
+    const stateFile = JSON.parse(await readFile(state.path(channelId), 'utf8'));
+    assert.equal(stateFile.status, 'blocked');
+
+    const outboxRecord = await outbox.get('state-uncertain-1');
+    assert.ok(outboxRecord, 'outbox record must exist');
+    assert.equal(outboxRecord.status, 'uncertain');
+
+    // Step 3 assertions: second turn on same server
     await server.handle({ jsonrpc: '2.0', id: 4, method: 'session/prompt', params: { sessionId, prompt } });
     const next = wire.trim().split('\n').map((line) => JSON.parse(line)).find((message) => message.id === 4);
     assert.ok(next?.error, `expected terminal error, got ${JSON.stringify(next)}`);
     assert.match(next.error.message, /blocked after an incomplete turn/i);
-    assert.equal(promptCalls, 1);
-    assert.equal(publications.length, 1);
+    assert.equal(promptCalls, 1, 'provider prompt must not rerun on second turn');
+    assert.equal(publishAttempts, 1, 'publisher must not be called on second turn');
+    assert.equal(ambiguousEffects, 1);
     assert.equal((JSON.parse(await readFile(state.path(channelId), 'utf8'))).status, 'blocked');
-  } finally { await server.close(); await state.release(); await rm(dir, { recursive: true, force: true }); }
+
+    // Simulated restart: new SessionState and new server instance
+    await server.close();
+    const restartedState = new SessionState({ dir, owner, relay: 'wss://relay.example.test' });
+    const restartedOutbox = new DeliveryOutbox({ dir: outboxDir, owner });
+    const scope = await restartedState.scope({ channelId, cwd: dir, model: 'gemini-3.8-flash-high' });
+    await assert.rejects(restartedState.load(scope), /blocked/i);
+
+    const restartedOutput = new PassThrough();
+    let restartedWire = '';
+    restartedOutput.setEncoding('utf8');
+    restartedOutput.on('data', (chunk) => { restartedWire += chunk; });
+    const restartedServer = createAcpServer({
+      input: new PassThrough(), output: restartedOutput, diagnostics: new PassThrough(),
+      sessionStateFactory: () => restartedState,
+      outboxFactory: () => restartedOutbox,
+      identityFactory: async () => owner,
+      sessionFactory: () => ({
+        prompt: async () => { promptCalls += 1; return 'answer'; },
+        getConversationId: () => 'conversation-1', hasConfirmedConversation: () => true,
+        cancel() {}, close() {}
+      }),
+      publisherFactory: () => publisher
+    });
+
+    try {
+      await restartedServer.handle({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: 1 } });
+      await restartedServer.handle({ jsonrpc: '2.0', id: 2, method: 'session/new', params: { cwd: dir } });
+      const restartedSessionId = [...restartedServer.sessions.keys()][0];
+      await restartedServer.handle({ jsonrpc: '2.0', id: 3, method: 'session/prompt', params: { sessionId: restartedSessionId, prompt } });
+      const restartedResp = restartedWire.trim().split('\n').map((line) => JSON.parse(line)).find((m) => m.id === 3);
+      assert.ok(restartedResp?.error, 'prompt on restarted server must fail');
+      assert.match(restartedResp.error.message, /blocked after an incomplete turn/i);
+
+      assert.equal(promptCalls, 1, 'provider prompt must remain 1 after restart attempt');
+      assert.equal(publishAttempts, 1, 'publish attempts must remain 1 after restart attempt');
+      assert.equal(ambiguousEffects, 1, 'ambiguous effects must remain 1 after restart attempt');
+    } finally {
+      await restartedServer.close();
+      await restartedState.release();
+    }
+  } finally {
+    await server.close();
+    await state.release();
+    await rm(dir, { recursive: true, force: true });
+    await rm(outboxDir, { recursive: true, force: true });
+  }
 });
 
 test('terminally blocks an ACP entry after a provider error before the next external effect', async () => {

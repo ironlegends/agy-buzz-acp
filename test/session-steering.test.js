@@ -403,6 +403,82 @@ test('keeps multiple corrections FIFO and publishes the segment after the last o
   session.close();
 });
 
+test('handles multiple corrections with provider cut after first injection without replay or kill fallback', async () => {
+  let childInstances = 0;
+  let providerPromptWrites = 0;
+  let steeringInjections = 0;
+  let currentChild = null;
+
+  const coordinator = fakeCoordinator();
+  const origObserve = coordinator.observeUserInput;
+  coordinator.observeUserInput = async (...args) => {
+    const result = await origObserve(...args);
+    if (result?.outcome === 'injected') steeringInjections += 1;
+    return result;
+  };
+
+  const session = new AgySession({
+    steeringCoordinator: coordinator,
+    spawnFn: () => {
+      childInstances += 1;
+      currentChild = fakeChild();
+      const origWrite = currentChild.stdin.write;
+      currentChild.stdin.write = (value) => {
+        try {
+          const parsed = JSON.parse(value);
+          if (parsed.event === 'user') providerPromptWrites += 1;
+        } catch {}
+        return origWrite(value);
+      };
+      return currentChild;
+    }
+  });
+
+  const turn = session.prompt('base prompt', () => {});
+  assert.equal(childInstances, 1);
+  assert.equal(providerPromptWrites, 1);
+
+  emit(currentChild, { event: 'init', conversation_id: conversationId });
+  emitUserInput(currentChild);
+  emit(currentChild, { event: 'step_update', step_update: {
+    step_type: 'agent_response', text_delta: 'BASE', conversation_id: conversationId, step_index: 1
+  } });
+
+  // Step 1: Queue two corrections during one prompt
+  const first = session.steer('first correction');
+  const second = session.steer('second correction');
+
+  // Resolve the first correction with matching user_input
+  emit(currentChild, { event: 'step_update', step_update: {
+    step_type: 'user_input', conversation_id: conversationId, step_index: 2
+  } });
+
+  // First correction resolves as injected exactly once
+  const firstResult = await first;
+  assert.equal(firstResult.steerId, 'steer-1');
+  assert.equal(steeringInjections, 1, 'first correction must be injected exactly once');
+
+  // Second correction remains queued. Now emit provider close before the second matching user_input
+  currentChild.emit('close');
+
+  // Step 2: Assert in-memory steering boundary
+  await assert.rejects(second, (error) => error.code === 'AGY_STEER_UNCERTAIN');
+  await assert.rejects(turn, (error) => error.code === 'AGY_STEER_UNCERTAIN');
+  assert.equal(coordinator.isBlocked(), true, 'fake coordinator must be blocked');
+  assert.equal(steeringInjections, 1, 'second correction must not be injected');
+
+  // Step 3: Assert no replay or cancellation fallback
+  assert.equal(currentChild.killCalls, 0, 'child kill calls must remain 0');
+  assert.equal(childInstances, 1, 'child instances must remain 1');
+  assert.equal(providerPromptWrites, 1, 'provider prompt writes must remain 1');
+
+  await assert.rejects(session.prompt('later prompt must fail', () => {}), /context lost|steering/i);
+  assert.equal(childInstances, 1, 'no new child may be spawned for replay');
+  assert.equal(providerPromptWrites, 1, 'no re-prompt may be sent');
+
+  session.close();
+});
+
 test('blocks before error when a provider result arrives before steering consumption', async () => {
   const child = fakeChild();
   const coordinator = fakeCoordinator();

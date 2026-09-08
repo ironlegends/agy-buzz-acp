@@ -420,3 +420,83 @@ test('marks a publication uncertain when cancellation interrupts the publisher',
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test('classifies a started publisher crash across the ACP boundary, persists uncertain outbox, and forbids automatic retry', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'agy-acp-outbox-cut-'));
+  try {
+    let publishAttempts = 0;
+    let ambiguousEffects = 0;
+    let providerPrompts = 0;
+    const owner = '1'.repeat(64);
+    const outbox = new DeliveryOutbox({ dir, owner, idFn: () => 'cut-recovery-1' });
+
+    const publisher = new BuzzPublisher({
+      spawnFn: (_command, args) => {
+        publishAttempts += 1;
+        const child = fakeChild();
+        child.spawnArgs = args;
+        const origEnd = child.stdin.end;
+        child.stdin.end = () => {
+          origEnd();
+          ambiguousEffects += 1;
+          setImmediate(() => {
+            child.emit('spawn');
+            child.emit('close', 1);
+          });
+        };
+        return child;
+      }
+    });
+
+    const app = await memoryAcp({
+      publisherFactory: () => publisher,
+      outboxFactory: () => outbox,
+      sessionFactory: () => ({
+        prompt: async () => {
+          providerPrompts += 1;
+          return 'completed response text';
+        },
+        cancel: () => {}
+      }),
+      identityFactory: async () => owner
+    });
+
+    const prompt = [block('[Base]'), block(`[Context]\nChannel: coordination (#${channelId})\nThread root: ${replyTo}`)];
+    await app.server.handle({ jsonrpc: '2.0', id: 3, method: 'session/prompt', params: { sessionId: app.sessionId, prompt } });
+
+    const response = app.messages.find((message) => message.id === 3);
+    assert.ok(response, 'must produce response for prompt');
+    assert.equal(response.result.stopReason, 'end_turn');
+    assert.equal(response.result.publication.status, 'uncertain');
+    assert.equal(response.result.publication.recoveryId, 'cut-recovery-1');
+
+    const deliveryActivity = app.messages.find(
+      (m) => m.params?.update?.sessionUpdate === 'tool_call_update' &&
+             m.params.update.title === 'Delivery uncertain' &&
+             m.params.update.status === 'failed'
+    );
+    assert.ok(deliveryActivity, 'delivery activity must be terminal and uncertain');
+    assert.match(deliveryActivity.params.update.content?.[0]?.content?.text ?? '', /Delivery uncertain/);
+
+    const storedRecord = await outbox.get('cut-recovery-1');
+    assert.ok(storedRecord, 'outbox record must exist');
+    assert.equal(storedRecord.status, 'uncertain');
+
+    assert.equal(publishAttempts, 1, 'publish attempts must remain 1');
+    assert.equal(ambiguousEffects, 1, 'ambiguous effects must remain 1');
+    assert.equal(providerPrompts, 1, 'provider prompt must not rerun');
+
+    const readbackList = await outbox.list();
+    assert.equal(readbackList.length, 1);
+    assert.equal(readbackList[0].status, 'uncertain');
+    assert.equal(publishAttempts, 1);
+    assert.equal(ambiguousEffects, 1);
+
+    const retryResult = await app.server.retryDelivery('cut-recovery-1', { identity: owner });
+    assert.equal(retryResult.status, 'blocked');
+    assert.equal(publishAttempts, 1, 'explicit retry must not invoke publisher on uncertain record');
+    assert.equal(providerPrompts, 1, 'provider must not be rerun');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
