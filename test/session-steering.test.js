@@ -4,6 +4,7 @@ import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { AgySession } from '../src/agy-session.js';
 import { createAcpServer } from '../src/acp-server.js';
+import { isolatedServerOptions } from '../scripts/environment-support.js';
 
 const conversationId = 'conv-steering-1';
 const channelId = '11111111-1111-4111-8111-111111111111';
@@ -137,7 +138,9 @@ function memoryServer({ sessionFactory, steeringFactory, publisherFactory } = {}
       if (line.trim()) messages.push(JSON.parse(line));
     }
   });
-  const server = createAcpServer({ input, output, diagnostics, sessionFactory, steeringFactory, publisherFactory });
+  const server = createAcpServer({ input, output, diagnostics,
+    ...isolatedServerOptions({ sessionFactory, steeringFactory, publisherFactory })
+  });
   const send = (message) => input.write(`${JSON.stringify(message)}\n`);
   const waitFor = async (predicate) => {
     const deadline = Date.now() + 1000;

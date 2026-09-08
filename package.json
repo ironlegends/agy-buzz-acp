@@ -42,8 +42,8 @@
     "src/steering.js"
   ],
   "scripts": {
-    "test": "node --test",
-    "check": "node --test && npm pack --dry-run"
+    "test": "node --import ./scripts/environment-support.js --test",
+    "check": "npm test && npm pack --dry-run"
   },
   "engines": {
     "node": ">=20"

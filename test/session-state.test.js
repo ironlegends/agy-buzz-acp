@@ -9,6 +9,7 @@ import { createAcpServer } from '../src/acp-server.js';
 import { SessionState } from '../src/session-state.js';
 import { BuzzPublisher } from '../src/buzz-publisher.js';
 import { DeliveryOutbox } from '../src/delivery/outbox.js';
+import { isolatedServerOptions } from '../scripts/environment-support.js';
 
 function fakeChild() {
   const child = new EventEmitter();
@@ -190,10 +191,10 @@ test('binds one ACP session to its first Buzz channel', async () => {
   const output = new PassThrough();
   const diagnostics = new PassThrough();
   const publications = [];
-  const server = createAcpServer({ input, output, diagnostics,
+  const server = createAcpServer({ input, output, diagnostics, ...isolatedServerOptions({
     sessionFactory: () => ({ prompt: async () => 'answer', cancel() {}, close() {} }),
     publisherFactory: () => ({ publish: async (message) => { publications.push(message); return { status: 'sent', eventId: 'ef'.repeat(32) }; } })
-  });
+  }) });
   const channelB = '223e4567-e89b-12d3-a456-426614174000';
   const promptFor = (channel) => [{ type: 'text', text: '[Base]\nPlatform context.' },
     { type: 'text', text: `[Context]\nChannel: coordination (#${channel})\nThread root: ${replyTo}\n[Buzz event: test]` }];

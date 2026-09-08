@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { AgySession, PINNED_PRINT_TIMEOUT } from '../src/agy-session.js';
 import { parseBuzzContext } from '../src/buzz-context.js';
 import { createAcpServer, describePromptShape } from '../src/acp-server.js';
+import { isolatedChildEnvironment, isolatedServerOptions } from '../scripts/environment-support.js';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const adapter = join(root, 'bin', 'agy-buzz-acp.js');
@@ -39,12 +40,12 @@ function startAdapter(options = {}) {
   return captureDirPromise.then((captureDir) => {
     const child = spawn(process.execPath, [adapter], {
       cwd: root,
-      env: { ...process.env, AGY_COMMAND: process.execPath, AGY_FAKE_SCRIPT: fakeAgy,
+      env: isolatedChildEnvironment({ AGY_COMMAND: process.execPath, AGY_FAKE_SCRIPT: fakeAgy,
         AGY_ARGS_FILE: join(captureDir, 'args.json'), AGY_CWD_FILE: join(captureDir, 'cwd.txt'),
         BUZZ_CLI_COMMAND: process.execPath, BUZZ_FAKE_SCRIPT: fakeBuzz,
         BUZZ_ARGS_FILE: join(captureDir, 'buzz-args.json'), BUZZ_CALLS_FILE: join(captureDir, 'buzz-calls.txt'),
         BUZZ_CONTENT_FILE: join(captureDir, 'buzz-content.txt'),
-        ...options.env },
+        ...options.env }),
       stdio: ['pipe', 'pipe', 'pipe']
     });
     const stdout = [];
@@ -107,7 +108,7 @@ function startMemoryServer({ sessionFactory, publisherFactory } = {}) {
       if (line.trim()) messages.push(JSON.parse(line));
     }
   });
-  createAcpServer({ input, output, diagnostics, sessionFactory, publisherFactory });
+  createAcpServer({ input, output, diagnostics, ...isolatedServerOptions({ sessionFactory, publisherFactory }) });
   const send = (message) => input.write(`${JSON.stringify(message)}\n`);
   const waitFor = async (predicate) => {
     const deadline = Date.now() + 1000;
@@ -871,7 +872,7 @@ test('emits ACP chunks for a provider response', async () => {
     }
   });
   let sessionPrompts = 0;
-  createAcpServer({ input, output, diagnostics,
+  createAcpServer({ input, output, diagnostics, ...isolatedServerOptions({
     sessionFactory: () => ({
       prompt: async (_text, onText) => {
         sessionPrompts += 1;
@@ -881,7 +882,7 @@ test('emits ACP chunks for a provider response', async () => {
       cancel: () => {}
     }),
     publisherFactory: () => ({ publish: async () => {} })
-  });
+  }) });
   const send = (message) => input.write(`${JSON.stringify(message)}\n`);
   const waitFor = async (predicate) => {
     const deadline = Date.now() + 1000;
@@ -1014,7 +1015,7 @@ test('keeps a session turn active through provider work and fails closed after c
       rejectFirstPrompt = null;
     }
   });
-  createAcpServer({ input, output, diagnostics, sessionFactory, publisherFactory: () => ({ publish: async () => {} }) });
+  createAcpServer({ input, output, diagnostics, ...isolatedServerOptions({ sessionFactory, publisherFactory: () => ({ publish: async () => {} }) }) });
   const send = (message) => input.write(`${JSON.stringify(message)}\n`);
   const waitFor = async (predicate) => {
     const deadline = Date.now() + 1000;

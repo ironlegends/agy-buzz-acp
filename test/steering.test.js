@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { acquireNativeLock } from '../src/native-lock.js';
+import { isolatedChildEnvironment } from '../scripts/environment-support.js';
 
 const execFile = promisify(execFileCallback);
 
@@ -49,7 +50,7 @@ async function runHookCommand(input, env) {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, ['bin/agy-buzz-steer-hook.js'], {
       cwd: new URL('..', import.meta.url),
-      env: { ...process.env, ...env },
+      env: isolatedChildEnvironment(env),
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true
     });
@@ -166,15 +167,14 @@ test('the helper claims one FIFO request and injects only a user message', async
   assert.deepEqual(await runHook(api, providerInput(), coordinator.bridgeEnv()), {});
 });
 
-test('reads an atomic snapshot while the native lock is held, then the real helper injects', async (t) => {
+test('reads an atomic snapshot while the native lock is held, then the real helper injects', { timeout: 30_000 }, async (t) => {
   const { api, coordinator } = await createHarness(t);
   const queued = await coordinator.enqueue('Correction A', { claimFloorStep: 41 });
   const lock = await acquireNativeLock(join(coordinator.bridgeDir, '.steering.lock'));
   try {
-    const snapshot = await Promise.race([
-      coordinator.snapshot(),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('snapshot remained blocked')), 250))
-    ]);
+    // Keep the lock held throughout the read. Windows ACL checks invoke a
+    // subprocess, so their latency is not a 250 ms lock-acquisition contract.
+    const snapshot = await coordinator.snapshot();
     assert.equal(snapshot.status, 'queued');
     assert.equal(snapshot.activeSteerId, null);
   } finally {

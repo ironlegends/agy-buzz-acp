@@ -7,6 +7,7 @@ import { spawn } from 'node:child_process';
 import { acquireNativeLock, createNativeLockAdapter } from '../src/native-lock.js';
 import { SessionState } from '../src/session-state.js';
 import { DeliveryOutbox } from '../src/delivery/outbox.js';
+import { isolatedChildEnvironment } from '../scripts/environment-support.js';
 
 const owner = 'ab'.repeat(32);
 const channelId = '123e4567-e89b-12d3-a456-426614174000';
@@ -32,7 +33,7 @@ function childLockScript(lockPath, action = 'hold') {
     }
   `;
   return spawn(process.execPath, ['--input-type=module', '-e', script], {
-    env: { ...process.env, AGY_TEST_LOCK_PATH: lockPath, AGY_TEST_LOCK_ACTION: action },
+    env: isolatedChildEnvironment({ AGY_TEST_LOCK_PATH: lockPath, AGY_TEST_LOCK_ACTION: action }),
     windowsHide: true
   });
 }

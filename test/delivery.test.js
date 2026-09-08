@@ -12,6 +12,7 @@ import { createAcpServer } from '../src/acp-server.js';
 import { PassThrough } from 'node:stream';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { isolatedChildEnvironment, isolatedServerOptions } from '../scripts/environment-support.js';
 
 const execFileAsync = promisify(execFile);
 const root = fileURLToPath(new URL('..', import.meta.url));
@@ -296,9 +297,9 @@ test('recovery CLI verifies the current Buzz identity before retrying stored del
     const outbox = new DeliveryOutbox({ dir, owner, idFn: () => 'cli-test' });
     await outbox.begin({ channelId, replyTo, content: 'operator response' });
     await outbox.update('cli-test', { status: 'failed-before-start' });
-    const env = { ...process.env, AGY_OUTBOX_DIR: dir, AGY_OUTBOX_OWNER: owner,
+    const env = isolatedChildEnvironment({ AGY_OUTBOX_DIR: dir, AGY_OUTBOX_OWNER: owner,
       BUZZ_CLI_COMMAND: process.execPath, BUZZ_FAKE_SCRIPT: fakeBuzz, BUZZ_SELF_PUBKEY: owner,
-      BUZZ_CALLS_FILE: join(dir, 'calls.txt') };
+      BUZZ_CALLS_FILE: join(dir, 'calls.txt') });
     const cli = join(root, 'bin', 'agy-buzz-recover.js');
     const listed = await execFileAsync(process.execPath, [cli, 'list'], { env });
     assert.match(listed.stdout, /cli-test/);
@@ -325,9 +326,9 @@ async function memoryAcp({ publisherFactory, outboxFactory, sessionFactory, iden
     for (const line of buffer.split('\n').slice(0, -1)) if (line.trim()) messages.push(JSON.parse(line));
     buffer = buffer.slice(buffer.lastIndexOf('\n') + 1);
   });
-  const server = createAcpServer({ input: new PassThrough(), output, diagnostics: new PassThrough(),
-    sessionFactory: sessionFactory ?? (() => ({ prompt: async () => 'completed response', cancel: () => {} })),
-    publisherFactory, outboxFactory, identityFactory
+  const server = createAcpServer({
+    input: new PassThrough(), output, diagnostics: new PassThrough(),
+    ...isolatedServerOptions({ publisherFactory, outboxFactory, sessionFactory, identityFactory })
   });
   await server.handle({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: 1 } });
   await server.handle({ jsonrpc: '2.0', id: 2, method: 'session/new', params: { cwd: process.cwd() } });
