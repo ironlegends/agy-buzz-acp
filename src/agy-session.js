@@ -228,8 +228,6 @@ export class AgySession {
       if (this.pending !== pending || pending.steeringFailure) return;
       if (!request || typeof request.steerId !== 'string') {
         const failure = steeringError('agy steering request was not queued');
-        pending.steerWaiters.delete(waiterKey);
-        rejectWaiter(failure);
         void this.failSteeringPending(pending, failure);
         return;
       }
@@ -242,8 +240,6 @@ export class AgySession {
       pending.steerOperations.delete(operation);
       const failure = error?.code?.startsWith?.('AGY_STEER_')
         ? error : steeringError('agy steering request could not be queued');
-      pending.steerWaiters.delete(waiterKey);
-      rejectWaiter(failure);
       void this.failSteeringPending(pending, failure);
     });
     return result;
@@ -336,7 +332,10 @@ export class AgySession {
 
   async stopAndWaitForClose(child, failureMessage) {
     const closePromise = this.childClosePromise;
-    stopChild(child);
+    if (!child._agyStopRequested) {
+      child._agyStopRequested = true;
+      stopChild(child);
+    }
     try {
       await this.waitForCloseWithin(closePromise, this.retireTimeoutMs);
     } catch {
@@ -493,6 +492,7 @@ export class AgySession {
     child.stdout.on('data', (chunk) => this.consume(chunk, child));
     child._agyResume = resume;
     this.childStartedAt = startedAt;
+    child._agyStopRequested = false;
     this.childClosePromise = new Promise((resolve) => { child._agyCloseResolve = resolve; });
     this.lastChildClosePromise = this.childClosePromise;
     this.awaitingResumeInit = resume;
@@ -502,8 +502,11 @@ export class AgySession {
     // take the whole adapter down instead of failing the single turn.
     child.stdin.on('error', () => {
       if (this.child !== child) return;
-      child._agyCloseResolve?.();
-      child._agyCloseResolve = null;
+      if (this.pending?.steeringFailure || child._agyStopRequested) return;
+      if (this.pending && this.hasUnsettledSteering(this.pending)) {
+        void this.failSteeringPending(this.pending, steeringError('agy provider input failed before steering consumption'));
+        return;
+      }
       this.child = null;
       this.childSteeringEnabled = false;
       this.buffer = '';
@@ -512,18 +515,18 @@ export class AgySession {
       this.resumeEligible = false;
       if (this.resumeTimer) clearTimeout(this.resumeTimer);
       this.resumeTimer = null;
+      child._agyStopRequested = true;
       stopChild(child);
-      if (this.pending && this.hasUnsettledSteering(this.pending)) {
-        void this.failSteeringPending(this.pending, steeringError('agy provider input failed before steering consumption'));
-      } else {
-        this.contextLost = true;
-        this.finishPending(wrapperError('agy input failed'));
-      }
+      this.contextLost = true;
+      this.finishPending(wrapperError('agy input failed'));
     });
     child.on('error', () => {
       if (this.child !== child) return;
-      child._agyCloseResolve?.();
-      child._agyCloseResolve = null;
+      if (this.pending?.steeringFailure || child._agyStopRequested) return;
+      if (this.pending && this.hasUnsettledSteering(this.pending)) {
+        void this.failSteeringPending(this.pending, steeringError('agy provider exited before steering consumption'));
+        return;
+      }
       this.child = null;
       this.childSteeringEnabled = false;
       this.buffer = '';
@@ -532,12 +535,8 @@ export class AgySession {
       this.resumeEligible = false;
       if (this.resumeTimer) clearTimeout(this.resumeTimer);
       this.resumeTimer = null;
-      if (this.pending && this.hasUnsettledSteering(this.pending)) {
-        void this.failSteeringPending(this.pending, steeringError('agy provider exited before steering consumption'));
-      } else {
-        this.contextLost = true;
-        this.finishPending(wrapperError('agy process failed to start'));
-      }
+      this.contextLost = true;
+      this.finishPending(wrapperError('agy process failed to start'));
     });
     child.on('close', () => {
       child._agyCloseResolve?.();
@@ -552,6 +551,7 @@ export class AgySession {
       this.awaitingResumeInit = false;
       if (this.resumeTimer) clearTimeout(this.resumeTimer);
       this.resumeTimer = null;
+      if (this.pending?.steeringFailure) return;
       // Report how long this agy process had been alive. --print-timeout is a
       // per-process wall clock, so an exit that lands on the pin is a different
       // failure from a crash on the first turn, and the age is the only signal
@@ -891,6 +891,21 @@ export class AgySession {
     this.steeringBlocked = true;
     this.contextLost = true;
     this.resumeEligible = false;
+    const child = this.child;
+    if (child) {
+      try {
+        await this.stopAndWaitForClose(child, 'agy steering provider retirement could not be confirmed');
+      } catch {
+        const causeCodes = [
+          ...(Array.isArray(finalFailure.causeCodes) ? finalFailure.causeCodes : []),
+          typeof finalFailure.code === 'string' ? finalFailure.code : 'AGY_STEER_UNCERTAIN',
+          'AGY_PROVIDER_RETIREMENT_UNCONFIRMED'
+        ];
+        finalFailure = steeringError('agy steering provider retirement could not be confirmed');
+        finalFailure.causeCodes = [...new Set(causeCodes)];
+      }
+    }
+    pending.steeringFailure = finalFailure;
     this.rejectSteeringWaiters(pending, finalFailure);
     this.finishPending(finalFailure);
   }

@@ -22,7 +22,14 @@ function fakeChild() {
   };
   child.stdin.end = () => {};
   child.killCalls = 0;
-  child.kill = () => { child.killCalls += 1; };
+  child._agyClosed = false;
+  child.on('close', () => { child._agyClosed = true; });
+  child.kill = () => {
+    child.killCalls += 1;
+    queueMicrotask(() => {
+      if (!child._agyClosed) child.emit('close');
+    });
+  };
   return child;
 }
 
@@ -497,7 +504,7 @@ test('blocks before error when a provider result arrives before steering consump
   await assert.rejects(turn, (error) => error.code === 'AGY_STEER_UNCERTAIN');
   await assert.rejects(steer, (error) => error.code === 'AGY_STEER_UNCERTAIN');
   assert.equal(coordinator.isBlocked(), true);
-  assert.equal(child.killCalls, 0);
+  assert.equal(child.killCalls, 1);
   await assert.rejects(session.prompt('replay is forbidden', () => {}), /context lost|steering/i);
   session.close();
 });
@@ -543,7 +550,7 @@ test('keeps a queued steer available past the model wait and times out only afte
   await assert.rejects(steer, /timed out/i);
   await assert.rejects(turn, /timed out/i);
   assert.equal(coordinator.isBlocked(), true);
-  assert.equal(child.killCalls, 0);
+  assert.equal(child.killCalls, 1);
   session.close();
 });
 
@@ -611,7 +618,7 @@ test('bounds permanent snapshot failures and cleans the claim watchdog', async (
   const snapshotCalls = coordinator.snapshotCount();
   await new Promise((resolve) => setTimeout(resolve, 60));
   assert.equal(coordinator.snapshotCount(), snapshotCalls, 'snapshot failures must not leave a polling loop alive');
-  assert.equal(child.killCalls, 0);
+  assert.equal(child.killCalls, 1);
   session.close();
 });
 
@@ -756,4 +763,135 @@ test('advertises and routes the ACP steering extension without accepting a new-t
   } finally {
     await app.close();
   }
+});
+
+test('stops the provider before rejecting a turn after steering fails', async () => {
+  const child = fakeChild();
+  const timeline = [];
+  child.kill = () => {
+    child.killCalls += 1;
+    timeline.push('stop');
+    queueMicrotask(() => {
+      timeline.push('close');
+      child.emit('close');
+    });
+  };
+  const coordinator = fakeCoordinator();
+  coordinator.block = async () => { timeline.push('blocked'); return true; };
+  coordinator.enqueue = async () => {
+    throw Object.assign(new Error('queue failed'), { code: 'AGY_STEER_QUEUE_FAILED' });
+  };
+  const session = new AgySession({ steeringCoordinator: coordinator, spawnFn: () => child, retireTimeoutMs: 50 });
+  const turn = session.prompt('base', () => {});
+  emit(child, { event: 'init', conversation_id: conversationId });
+  emitUserInput(child);
+  const rejection = turn.catch((error) => { timeline.push('turn-rejected'); return error; });
+  const steer = session.steer('must stop after queue failure');
+  const steerRejection = steer.catch((error) => { timeline.push('steer-rejected'); return error; });
+
+  const steerError = await steerRejection;
+  assert.match(steerError.message, /queued|queue/i);
+  const error = await rejection;
+  assert.equal(error.code, 'AGY_STEER_QUEUE_FAILED');
+  assert.deepEqual(timeline, ['blocked', 'stop', 'close', 'steer-rejected', 'turn-rejected']);
+  assert.equal(child.killCalls, 1);
+  session.close();
+});
+
+test('reports retirement failure and stays blocked when the provider does not close', async () => {
+  const child = fakeChild();
+  child.kill = () => { child.killCalls += 1; };
+  const coordinator = fakeCoordinator();
+  let blockCalls = 0;
+  coordinator.block = async () => { blockCalls += 1; return true; };
+  coordinator.enqueue = async () => {
+    throw Object.assign(new Error('queue failed'), { code: 'AGY_STEER_QUEUE_FAILED' });
+  };
+  const session = new AgySession({ steeringCoordinator: coordinator, spawnFn: () => child, retireTimeoutMs: 10 });
+  const turn = session.prompt('base', () => {});
+  emit(child, { event: 'init', conversation_id: conversationId });
+  emitUserInput(child);
+  const steer = session.steer('must report retirement failure');
+
+  const steerError = await steer.then(() => null, (error) => error);
+  assert.match(steerError.message, /retirement|close|timeout/i);
+  const error = await turn.then(() => null, (cause) => cause);
+  assert.ok(error, 'the provider turn must reject');
+  assert.match(error.message, /retirement|close|timeout/i);
+  assert.equal(error.code, 'AGY_STEER_UNCERTAIN');
+  assert.equal(blockCalls, 1);
+  assert.equal(child.killCalls, 1);
+  assert.equal(session.contextLost, true);
+  assert.equal(session.resumeEligible, false);
+  await assert.rejects(session.prompt('replay is forbidden', () => {}), /context lost|resume/i);
+  session.close();
+});
+
+test('does not kill a provider that already closed before steering failure handling', async () => {
+  const child = fakeChild();
+  const coordinator = fakeCoordinator();
+  const session = new AgySession({ steeringCoordinator: coordinator, spawnFn: () => child, retireTimeoutMs: 50 });
+  const turn = session.prompt('base', () => {});
+  emit(child, { event: 'init', conversation_id: conversationId });
+  emitUserInput(child);
+  const steer = session.steer('provider will close first');
+  child.emit('close');
+
+  await assert.rejects(steer, /steering|context/i);
+  await assert.rejects(turn, /steering|context/i);
+  assert.equal(child.killCalls, 0);
+  assert.equal(session.contextLost, true);
+  session.close();
+});
+
+test('waits for a real close after stdin EPIPE during steering failure', async () => {
+  const child = fakeChild();
+  child.kill = () => { child.killCalls += 1; };
+  const coordinator = fakeCoordinator();
+  const session = new AgySession({ steeringCoordinator: coordinator, spawnFn: () => child, retireTimeoutMs: 50 });
+  const turn = session.prompt('base', () => {});
+  emit(child, { event: 'init', conversation_id: conversationId });
+  emitUserInput(child);
+  const steer = session.steer('EPIPE must await close');
+  let settled = false;
+  const turnOutcome = turn.then(() => { settled = true; }, (error) => { settled = true; return error; });
+  const steerOutcome = steer.then(() => null, (error) => error);
+
+  child.stdin.emit('error', new Error('EPIPE'));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(settled, false, 'EPIPE must not reject ACP promises before close');
+  assert.equal(child.killCalls, 1);
+
+  child.emit('close');
+  const [turnError, steerError] = await Promise.all([turnOutcome, steerOutcome]);
+  assert.equal(turnError.code, 'AGY_STEER_UNCERTAIN');
+  assert.equal(steerError.code, 'AGY_STEER_UNCERTAIN');
+  assert.equal(child.killCalls, 1);
+  session.close();
+});
+
+test('waits for a real close after provider error during steering failure', async () => {
+  const child = fakeChild();
+  child.kill = () => { child.killCalls += 1; };
+  const coordinator = fakeCoordinator();
+  const session = new AgySession({ steeringCoordinator: coordinator, spawnFn: () => child, retireTimeoutMs: 50 });
+  const turn = session.prompt('base', () => {});
+  emit(child, { event: 'init', conversation_id: conversationId });
+  emitUserInput(child);
+  const steer = session.steer('provider error must await close');
+  let settled = false;
+  const turnOutcome = turn.then(() => { settled = true; }, (error) => { settled = true; return error; });
+  const steerOutcome = steer.then(() => null, (error) => error);
+
+  child.emit('error', new Error('provider error'));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(settled, false, 'provider error must not reject ACP promises before close');
+  assert.equal(child.killCalls, 1);
+
+  child.emit('close');
+  const [turnError, steerError] = await Promise.all([turnOutcome, steerOutcome]);
+  assert.equal(turnError.code, 'AGY_STEER_UNCERTAIN');
+  assert.equal(steerError.code, 'AGY_STEER_UNCERTAIN');
+  assert.equal(child.killCalls, 1);
+  session.close();
 });
