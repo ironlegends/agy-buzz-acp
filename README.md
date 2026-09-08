@@ -1,6 +1,6 @@
 # agy-buzz-acp
 
-A dependency-free, English-language ACP stdio bridge between Buzz and the official Antigravity CLI (`agy`). It preserves one provider conversation per Buzz session, reports activity separately from the answer, and publishes the final answer through the Buzz CLI.
+A minimal-dependency ACP stdio bridge between Buzz and the official Antigravity CLI (`agy`). It preserves one provider conversation per Buzz session, reports activity separately from the answer, and publishes the final answer through the Buzz CLI.
 
 This is a community adapter for Buzz. It is not a general-purpose ACP client adapter, a Google product, or a replacement for either CLI.
 
@@ -18,6 +18,7 @@ The JavaScript runtime uses standard Node APIs. Windows has real-provider valida
 Download an archive from the [releases page](https://github.com/ironlegends/agy-buzz-acp/releases), or build from a source checkout:
 
 ```sh
+npm ci
 npm test
 npm pack
 ```
@@ -25,10 +26,10 @@ npm pack
 Install the generated archive, or an archive from a reviewed release:
 
 ```sh
-npm install --global ./agy-buzz-acp-0.4.0.tgz
+npm install --global ./agy-buzz-acp-0.5.3.tgz
 ```
 
-The package provides `agy-buzz-acp`, `agy-buzz-recover`, `agy-buzz-doctor`, and `agy-buzz-manage`. No npm dependencies are needed. No npm-registry publication is required to install the archive.
+The package provides `agy-buzz-acp`, `agy-buzz-recover`, `agy-buzz-doctor`, `agy-buzz-manage`, and `agy-buzz-steer-hook`. The native file-lock dependency and its bundled support packages are included in the release archive. No npm-registry publication is required to install the archive.
 
 Generate the custom harness settings using your actual installation paths:
 
@@ -58,6 +59,10 @@ The default diagnostic is offline and does not log in, send messages, run provid
 | `AGY_SESSION_OWNER` | Public Buzz identity, 64 hexadecimal characters; required with the session directory. |
 | `AGY_OUTBOX_DIR` | Optional trusted local directory for final answers and delivery state. |
 | `AGY_OUTBOX_OWNER` | Public Buzz identity, 64 hexadecimal characters; required with the outbox directory. |
+| `AGY_STEER_HOOK_CONFIGURED` | Set to `1` only when the dedicated official agy PostInvocation hook is installed and configured. |
+| `AGY_STEER_INJECTOR_EXCLUSIVE` | Set to `1` only when this hook is the sole steering injector for the provider. |
+| `AGY_STEER_OWNER` | Public Buzz identity, 64 hexadecimal characters; falls back to `AGY_SESSION_OWNER`. |
+| `AGY_STEER_ROOT_DIR` | Optional trusted local directory for steering bridge state. |
 
 Buzz supplies its own relay and managed identity environment. Do not copy another installation's credentials or embed them in custom harness examples. Optional state belongs to the local installation and identity.
 
@@ -93,11 +98,11 @@ Delivery states:
 
 The adapter rotates an aging provider process between completed turns, at 21 hours, leaving three hours before agy's 24-hour process limit (one hour of dispatch margin beyond a two-hour Buzz turn). It waits for the old child to close, starts `agy --conversation` with the confirmed identifier, and requires a matching `init` before sending the next prompt. Rotation does not interrupt an active turn or replay a previous prompt.
 
-For optional continuity across an orderly adapter shutdown, configure both `AGY_SESSION_DIR` and `AGY_SESSION_OWNER`. Buzz must supply `BUZZ_RELAY_URL`. A configured `AGY_RELAY_URL` must agree with that actual publisher endpoint; it cannot silently override it for session recovery.
+For optional continuity across adapter termination and restart, configure both `AGY_SESSION_DIR` and `AGY_SESSION_OWNER`. Buzz must supply `BUZZ_RELAY_URL`. A configured `AGY_RELAY_URL` must agree with that actual publisher endpoint; it cannot silently override it for session recovery. Version 0.5.3 uses native OS locks, so recovery does not depend on a graceful Buzz shutdown after a completed checkpoint.
 
 Associations are scoped to the verified public Buzz identity, relay, canonical working directory, model and channel. They contain an identifier and scope metadata, not conversation text or credentials. A channel lock prevents concurrent owners. The adapter only records readiness after successful final-answer delivery and invalidates readiness before the next turn.
 
-Interrupted or uncertain work, corrupted state, mismatched scope and stale locks block automatic recovery. Abrupt termination may leave a lock requiring operator reconciliation. The adapter does not automatically remove stale locks, replay interrupted work or reconcile uncertain relay publication. The recovery CLI described below is for retained answers, not for overriding conversation locks.
+Interrupted or uncertain work, corrupted state and mismatched scope block automatic recovery. A native lock file may remain after release; its presence is not evidence of an active owner. An incomplete or uncertain turn still requires operator reconciliation. The adapter does not automatically remove lock files, replay interrupted work or reconcile uncertain relay publication. The recovery CLI described below is for retained answers, not for overriding conversation locks.
 
 If a conversation is blocked, stop its adapter and reconcile the provider and relay state first. To deliberately start a new conversation after that check, configure a new empty private session directory and preserve the old directory as evidence. This is an operator decision that discards continuity; it is not automatic recovery or prompt replay.
 
@@ -161,4 +166,4 @@ Use `agy-buzz-doctor --harness /path/to/harness.json --json` to inspect the conf
 
 Use `agy-buzz-manage` to plan a local archive installation or rollback. Supply the expected SHA-256 from a trusted release reference. Changes require `--apply`; the tool does not restart agents or refresh Desktop. See [upgrades and rollback](docs/UPGRADING.md).
 
-The [shutdown limitation](docs/COMPATIBILITY.md#shutdown-limitation-in-buzz) must be resolved before relying on durable conversation recovery across a Buzz restart. Outbox recovery and conversation recovery are separate mechanisms.
+See [recovery with official Buzz](docs/OFFICIAL_BUZZ_RECOVERY.md) for the native-lock design, forced-stop boundaries and migration requirements. Outbox recovery and conversation recovery remain separate mechanisms. Native dependencies are bundled in the release archive; do not copy only the JavaScript files when installing an extracted runtime.

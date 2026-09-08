@@ -124,7 +124,7 @@ test('treats a legacy step without step_type as an agent response only', async (
   assert.equal(activity.length, 2);
 });
 
-test('resumes only after a successful turn and matching init, before sending the next prompt', async () => {
+test('resumes only after a successful turn, then rejects a repeated init', async () => {
   const children = [];
   const activity = [];
   const invocations = [];
@@ -149,11 +149,11 @@ test('resumes only after a successful turn and matching init, before sending the
   assert.equal(children[1].stdin.writes.length, 0);
   emit(children[1], { event: 'init', conversation_id: 'resume-123' });
   assert.equal(children[1].stdin.writes.length, 1);
+  const repeatedInit = assert.rejects(second, /repeated init/i);
   emit(children[1], { event: 'init', conversation_id: 'resume-123' });
+  await repeatedInit;
   assert.equal(children[1].stdin.writes.length, 1);
   assert.match(children[1].stdin.writes[0], /"second"/);
-  emit(children[1], { event: 'result', result: { conversation_id: 'resume-123', status: 'SUCCESS', response: 'second' } });
-  assert.equal(await second, 'second');
   assert.notEqual(activity[0].toolCallId, activity[2].toolCallId);
 });
 

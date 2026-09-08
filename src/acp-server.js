@@ -1,5 +1,6 @@
-import { randomUUID } from 'node:crypto';
-import { isAbsolute } from 'node:path';
+import { createHash, randomUUID } from 'node:crypto';
+import { isAbsolute, join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { promptToText } from './prompt.js';
 import { AgySession } from './agy-session.js';
 import { parseBuzzContext } from './buzz-context.js';
@@ -8,8 +9,53 @@ import { createConfiguredOutbox } from './delivery/outbox.js';
 import { getBuzzPublicKey } from './delivery/identity.js';
 import { createConfiguredSessionState } from './session-state.js';
 import { listModels, modelConfigOptions } from './models.js';
+import { createSteeringCoordinator, inspectSteeringBridge, MAX_STEERING_TEXT_LENGTH } from './steering.js';
 
 const JSON_RPC = '2.0';
+const TERMINAL_SESSION_STATE_MESSAGE = 'agy session state is blocked after an incomplete turn';
+const TERMINAL_SESSION_CONTEXT_MESSAGE = 'agy session context lost; resume unsupported';
+const STEERING_RPC_CODE = -32004;
+const STEERING_UNCERTAIN_MESSAGE = 'agy steering outcome is uncertain';
+const OWNER_RE = /^[0-9a-f]{64}$/i;
+
+function envFlag(value) {
+  return value === '1' || value === 'true';
+}
+
+function steeringConfiguration(env = process.env, override = {}) {
+  const hookConfigured = override.hookConfigured ?? envFlag(env.AGY_STEER_HOOK_CONFIGURED);
+  const injectorExclusive = override.injectorExclusive ?? envFlag(env.AGY_STEER_INJECTOR_EXCLUSIVE);
+  const ownerId = override.ownerId ?? env.AGY_STEER_OWNER ?? env.AGY_SESSION_OWNER;
+  return {
+    hookConfigured,
+    injectorExclusive,
+    ownerId,
+    rootDir: override.rootDir ?? env.AGY_STEER_ROOT_DIR,
+    enabled: Boolean(hookConfigured && injectorExclusive && OWNER_RE.test(ownerId ?? ''))
+  };
+}
+
+function steeringRpcError(message, code = STEERING_RPC_CODE) {
+  return Object.assign(new Error(message), { rpcCode: code, rpcMessage: message, code: 'AGY_STEER_PROTOCOL' });
+}
+
+function normalizeSteeringPrompt(prompt) {
+  if (!Array.isArray(prompt) || prompt.length === 0) {
+    throw steeringRpcError('agy steering prompt must contain text blocks', -32602);
+  }
+  let text = '';
+  for (const block of prompt) {
+    if (!block || block.type !== 'text' || typeof block.text !== 'string') {
+      throw steeringRpcError('only ACP text steering prompt blocks are supported', -32602);
+    }
+    text += block.text;
+    if (text.length > MAX_STEERING_TEXT_LENGTH) {
+      throw steeringRpcError('agy steering prompt is too long', -32602);
+    }
+  }
+  if (text.trim().length === 0) throw steeringRpcError('agy steering prompt is invalid', -32602);
+  return text;
+}
 
 function rpcResult(id, result) {
   return { jsonrpc: JSON_RPC, id, result };
@@ -38,7 +84,7 @@ export function describePromptShape(prompt) {
   return `blocks=${prompt.length} ${blocks.join(' ; ')}`;
 }
 
-export function createAcpServer({ input = process.stdin, output = process.stdout, diagnostics = process.stderr, sessionFactory, publisherFactory, outboxFactory, identityFactory, sessionStateFactory, modelCatalogFactory } = {}) {
+export function createAcpServer({ input = process.stdin, output = process.stdout, diagnostics = process.stderr, sessionFactory, publisherFactory, outboxFactory, identityFactory, sessionStateFactory, modelCatalogFactory, steeringFactory, steeringConfig, steeringSupported } = {}) {
   const sessions = new Map();
   const activeTurns = new Map();
   const recoveries = new Map();
@@ -63,6 +109,9 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
   }));
   const outbox = outboxFactory ? outboxFactory() : createConfiguredOutbox();
   const sessionState = sessionStateFactory ? sessionStateFactory() : createConfiguredSessionState();
+  const resolvedSteeringConfig = steeringConfiguration(process.env, steeringConfig);
+  const steeringCapability = Boolean(steeringSupported ?? Boolean(steeringFactory ? true : resolvedSteeringConfig.enabled));
+  const makeSteering = steeringFactory ?? ((options) => createSteeringCoordinator(options));
   const makeIdentity = identityFactory ?? (() => getBuzzPublicKey({
     command: process.env.BUZZ_CLI_COMMAND || 'buzz',
     prefixArgs: process.env.BUZZ_FAKE_SCRIPT ? [process.env.BUZZ_FAKE_SCRIPT] : []
@@ -71,6 +120,63 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
   let initialized = false;
   let closing = false;
   let buffer = '';
+
+  function steeringLocation(channelId) {
+    const ownerId = resolvedSteeringConfig.ownerId ?? sessionState?.owner;
+    const rootDir = resolvedSteeringConfig.rootDir ?? join(tmpdir(), 'agy-buzz-steering');
+    const bridgeKey = createHash('sha256').update(`${ownerId ?? 'test'}:${channelId}`).digest('hex');
+    const steeringSessionId = `channel_${createHash('sha256').update(channelId).digest('hex').slice(0, 96)}`;
+    return { ownerId, rootDir, bridgeDir: join(rootDir, `channel-${bridgeKey}`), steeringSessionId };
+  }
+
+  async function inspectExistingSteering(entry, channelId) {
+    if (!steeringCapability || steeringFactory) return;
+    const location = steeringLocation(channelId);
+    if (!OWNER_RE.test(location.ownerId ?? '')) return;
+    const status = await inspectSteeringBridge({
+      bridgeDir: location.bridgeDir,
+      ownerId: location.ownerId,
+      channelId
+    });
+    if (status.blocked) {
+      entry.stateError ??= 'agy steering is durably blocked';
+      throw steeringRpcError(entry.stateError);
+    }
+  }
+
+  async function ensureSteering(entry, channelId) {
+    if (!steeringCapability || entry.steering) return entry.steering ?? null;
+    const knownConversationId = entry.session.getConversationId?.();
+    const ownerId = resolvedSteeringConfig.ownerId ?? sessionState?.owner;
+    if (!steeringFactory && !OWNER_RE.test(ownerId ?? '')) return null;
+    const location = steeringLocation(channelId);
+    const conversationBound = typeof knownConversationId === 'string' && knownConversationId.length > 0;
+    const conversationId = conversationBound ? knownConversationId : `pending-${location.steeringSessionId}`;
+    const coordinator = await makeSteering({
+      rootDir: location.rootDir,
+      bridgeDir: location.bridgeDir,
+      ownerId,
+      channelId,
+      sessionId: location.steeringSessionId,
+      conversationId,
+      hookConfigured: steeringFactory ? true : resolvedSteeringConfig.hookConfigured,
+      injectorExclusive: steeringFactory ? true : resolvedSteeringConfig.injectorExclusive,
+      conversationBound
+    });
+    if (!coordinator?.enabled || typeof coordinator.enqueue !== 'function' ||
+        typeof coordinator.observeUserInput !== 'function' || typeof coordinator.snapshot !== 'function' ||
+        typeof coordinator.block !== 'function') {
+      throw steeringRpcError('agy steering dedicated hook is unavailable');
+    }
+    coordinator.assertBinding?.({ ownerId, channelId, sessionId: location.steeringSessionId, conversationId });
+    entry.steering = coordinator;
+    entry.session.setSteeringCoordinator?.(coordinator);
+    return coordinator;
+  }
+
+  const blockEntry = (entry) => {
+    entry.stateError ??= sessionState?.enabled ? TERMINAL_SESSION_STATE_MESSAGE : TERMINAL_SESSION_CONTEXT_MESSAGE;
+  };
 
   const write = (message) => output.write(`${JSON.stringify(message)}\n`);
   const report = (message) => diagnostics.write(`[agy-buzz-acp] ${message}\n`);
@@ -105,7 +211,8 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
             promptCapabilities: { image: false, audio: false, embeddedContext: false },
             mcpCapabilities: { http: false, sse: false }
           },
-          agentInfo: { name: 'agy-buzz-acp', version: '0.4.0' }
+          _meta: { steering: { supported: steeringCapability } },
+          agentInfo: { name: 'agy-buzz-acp', version: '0.5.3' }
         }));
         return;
       }
@@ -148,8 +255,9 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
           model: requestedModel
         });
         session.setModelCatalog?.(catalog);
-        sessions.set(sessionId, { session, cwd: params.cwd,
-          model: requestedModel, modelCatalog: catalog, bound: false, stateError: null });
+        sessions.set(sessionId, { session, sessionId, cwd: params.cwd,
+          model: requestedModel, modelCatalog: catalog, bound: false, stateError: null,
+          steering: null });
         if (id !== undefined) write(rpcResult(id, { sessionId, configOptions: modelConfigOptions(catalog, requestedModel) }));
         return;
       }
@@ -171,12 +279,26 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
         if (id !== undefined) write(rpcResult(id, { configOptions: modelConfigOptions(entry.modelCatalog, value) }));
         return;
       }
+      if (message.method === '_session/steering') {
+        const entry = sessions.get(params.sessionId);
+        if (!entry) throw Object.assign(new Error('unknown session'), { rpcCode: -32001 });
+        if (!steeringCapability || !entry.steering || typeof entry.session.steer !== 'function') {
+          throw steeringRpcError('agy steering is unavailable without a confirmed dedicated hook');
+        }
+        if (entry.stateError) throw steeringRpcError(entry.stateError);
+        const steerText = normalizeSteeringPrompt(params.prompt);
+        const outcome = await entry.session.steer(steerText);
+        if (outcome?.outcome !== 'injected') throw steeringRpcError(STEERING_UNCERTAIN_MESSAGE);
+        if (id !== undefined) write(rpcResult(id, { outcome: 'injected' }));
+        return;
+      }
       if (message.method === 'session/prompt') {
         if (Object.prototype.hasOwnProperty.call(params, 'model')) throw Object.assign(new Error('model override is not supported'), { rpcCode: -32602 });
         const entry = sessions.get(params.sessionId);
         if (!entry) throw Object.assign(new Error('unknown session'), { rpcCode: -32001 });
         const session = entry.session;
         if (activeTurns.has(params.sessionId)) throw Object.assign(new Error('session turn is busy'), { rpcCode: -32002 });
+        if (entry.stateError) throw Object.assign(new Error(entry.stateError), { rpcCode: -32603, rpcMessage: entry.stateError });
         const text = promptToText(params.prompt);
         report(`session/prompt blocks=${Array.isArray(params.prompt) ? params.prompt.length : 0}`);
         const buzzContext = parseBuzzContext(params.prompt);
@@ -188,6 +310,7 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
           throw Object.assign(new Error('agy session channel scope cannot change'), { rpcCode: -32602, rpcMessage: 'agy session channel scope cannot change' });
         }
         entry.channelId ??= buzzContext.channelId;
+        if (steeringCapability) await inspectExistingSteering(entry, buzzContext.channelId);
         const controller = new AbortController();
         activeTurns.set(params.sessionId, controller);
         let stateScope = null;
@@ -211,6 +334,7 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
             }
             await sessionState.invalidate(stateScope);
           }
+          if (steeringCapability) await ensureSteering(entry, buzzContext.channelId);
           if (outbox?.configurationError) {
             throw Object.assign(new Error(outbox.configurationError), { rpcCode: -32602, rpcMessage: outbox.configurationError });
           }
@@ -220,6 +344,7 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
         } catch (error) {
           activeTurns.delete(params.sessionId);
           if (channelSessions.get(buzzContext.channelId) === params.sessionId) channelSessions.delete(buzzContext.channelId);
+          if (stateScope) blockEntry(entry);
           throw error;
         }
         const toolCallId = `delivery_${randomUUID().replaceAll('-', '')}`;
@@ -232,7 +357,11 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
           status,
           content: [{ type: 'content', content: { type: 'text', text: content } }]
         });
+        let providerStarted = false;
+        let turnSafe = false;
+        let providerRetired = false;
         try {
+          providerStarted = true;
           const response = await session.prompt(text, (delta) => write({
             jsonrpc: JSON_RPC,
             method: 'session/update',
@@ -251,6 +380,7 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
             report(`outbox prepare failed code=${error?.code ?? 'unknown'} recovery=${recoveryId}`);
           }
           if (durabilityFailed) {
+            blockEntry(entry);
             const delivery = { status: 'failed-before-start', recoveryId };
             deliveryActivity('tool_call_update', 'Publication failed', 'failed', `Publication failed; recovery ${recoveryId}`);
             emitDeliveryDiagnostic(params.sessionId, delivery.status, recoveryId);
@@ -265,6 +395,7 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
           }
           if (!publication || typeof publication !== 'object') publication = { status: 'uncertain' };
           const status = ['sent', 'failed-before-start', 'uncertain'].includes(publication.status) ? publication.status : 'uncertain';
+          if (status !== 'sent') blockEntry(entry);
           if (recoveryId) {
             try { await outbox.update(recoveryId, { status, ...(publication.eventId ? { eventId: publication.eventId } : {}) }); }
             catch (error) { report(`outbox update failed code=${error?.code ?? 'unknown'} recovery=${recoveryId}`); }
@@ -275,13 +406,53 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
           else deliveryActivity('tool_call_update', 'Delivery uncertain', 'failed', `Delivery uncertain; recovery ${recoveryId ?? 'unavailable'}`);
           if (status === 'sent' && stateScope && sessionState?.enabled) {
             try {
+              if (steeringCapability) {
+                await ensureSteering(entry, buzzContext.channelId);
+                if (entry.steering && !providerRetired) {
+                  const steeringConversationId = session.getConversationId?.();
+                  if (typeof session.retireForCheckpoint !== 'function' ||
+                      await session.retireForCheckpoint() !== steeringConversationId) {
+                    throw steeringRpcError('agy steering provider retirement could not be confirmed');
+                  }
+                  providerRetired = true;
+                }
+              }
               const conversationId = session.getConversationId?.();
               if (conversationId && session.hasConfirmedConversation?.()) {
+                if (!providerRetired && (typeof session.retireForCheckpoint !== 'function' ||
+                    await session.retireForCheckpoint() !== conversationId)) {
+                  throw new Error('provider retirement could not be confirmed');
+                }
+                if (!providerRetired) {
+                  providerRetired = true;
+                }
+                if (controller.signal.aborted) throw new Error('checkpoint cancelled');
                 await sessionState.save(stateScope, conversationId);
+                turnSafe = true;
+              } else {
+                blockEntry(entry);
               }
             } catch (error) {
               entry.stateError = 'agy session association could not be saved';
               report('session association could not be saved');
+            }
+          } else if (status === 'sent' && !sessionState?.enabled) {
+            try {
+              if (steeringCapability) {
+                await ensureSteering(entry, buzzContext.channelId);
+                if (entry.steering && !providerRetired) {
+                  const steeringConversationId = session.getConversationId?.();
+                  if (typeof session.retireForCheckpoint !== 'function' ||
+                      await session.retireForCheckpoint() !== steeringConversationId) {
+                    throw steeringRpcError('agy steering provider retirement could not be confirmed');
+                  }
+                  providerRetired = true;
+                }
+              }
+              turnSafe = true;
+            } catch (error) {
+              entry.stateError = error?.rpcMessage ?? 'agy steering provider retirement could not be confirmed';
+              report('steering provider retirement could not be confirmed');
             }
           }
           if (status !== 'sent') {
@@ -294,6 +465,7 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
             write(rpcResult(id, { stopReason: 'end_turn', publication: delivery }));
           }
         } finally {
+          if (providerStarted && !turnSafe) blockEntry(entry);
           activeTurns.delete(params.sessionId);
         }
         return;

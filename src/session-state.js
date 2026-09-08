@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { chmod, mkdir, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { acquireNativeLock } from './native-lock.js';
 
 const OWNER_RE = /^[0-9a-f]{64}$/i;
 const CHANNEL_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -73,7 +74,7 @@ export class SessionState {
       (!this.dir || !this.owner || !this.relay)
       ? 'AGY_SESSION_DIR, AGY_SESSION_OWNER (64 hex characters), and AGY_RELAY_URL are all required'
       : null;
-    this.ownedChannels = new Set();
+    this.ownedChannels = new Map();
   }
 
   get enabled() {
@@ -87,22 +88,26 @@ export class SessionState {
     if (!CHANNEL_RE.test(channelId) && channelId !== 'adapter') throw stateError('agy session state scope is invalid');
     const lockPath = join(this.dir, `.${scopeKey(channelId)}.lock`);
     if (this.ownedChannels.has(channelId)) return true;
+    let lock;
     try {
-      await mkdir(lockPath, { recursive: false, mode: 0o700 });
-      await writeFile(join(lockPath, 'owner'), `${process.pid}\n`, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
-      this.ownedChannels.add(channelId);
+      lock = await acquireNativeLock(lockPath);
+      this.ownedChannels.set(channelId, lock);
       return true;
     } catch (error) {
-      if (error?.code === 'EEXIST') throw stateError('agy session state is owned by another adapter', 'AGY_SESSION_STATE_BUSY');
+      if (error?.code === 'AGY_NATIVE_LOCK_BUSY') throw stateError('agy session state is owned by another adapter', 'AGY_SESSION_STATE_BUSY');
+      if (error?.code === 'AGY_NATIVE_LOCK_LEGACY') throw stateError('agy legacy session state lock is unsupported', 'AGY_SESSION_STATE_LEGACY_LOCK');
       throw stateError('agy session state ownership could not be established');
     }
   }
 
   async release() {
-    for (const channelId of this.ownedChannels) {
-      await rm(join(this.dir, `.${scopeKey(channelId)}.lock`), { recursive: true, force: true });
+    let failure;
+    for (const lock of this.ownedChannels.values()) {
+      try { await lock.release(); }
+      catch (error) { failure ??= error; }
     }
     this.ownedChannels.clear();
+    if (failure) throw failure;
   }
 
   async scope({ channelId, cwd, model }) {

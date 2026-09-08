@@ -18,6 +18,7 @@ export const PACKAGE_NAME = 'agy-buzz-acp';
 const REQUIRED_FILES = ['package.json', 'bin/agy-buzz-acp.js'];
 const SHA256_RE = /^[a-f0-9]{64}$/i;
 const VERSION_RE = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
+const PACKAGE_NAME_RE = /^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/;
 const MAX_ARCHIVE_BYTES = 128 * 1024 * 1024;
 const RECEIPT_SUFFIX = '.receipt.json';
 
@@ -103,6 +104,42 @@ function parseTar(gzipBytes) {
   return entries;
 }
 
+function bundledDependencies(manifest) {
+  if (manifest.bundledDependencies === undefined) return new Set();
+  if (!Array.isArray(manifest.bundledDependencies) || manifest.bundledDependencies.some((name) => typeof name !== 'string' || !PACKAGE_NAME_RE.test(name))) {
+    fail('archive bundled dependencies must be a list of valid package names');
+  }
+  const names = new Set(manifest.bundledDependencies);
+  if (names.size !== manifest.bundledDependencies.length) fail('archive bundled dependencies contain duplicates');
+  return names;
+}
+
+function validateBundledPath(name, type, bundles) {
+  const parts = name.split('/');
+  if (parts[0] !== 'node_modules') return false;
+  if (parts.length === 1) {
+    if (type !== '5') fail(`archive contains an invalid node_modules entry: ${name}`);
+    return true;
+  }
+  let packageName;
+  let contentStart;
+  if (parts[1].startsWith('@')) {
+    if (parts.length < 3) fail(`archive contains an invalid bundled package path: ${name}`);
+    packageName = `${parts[1]}/${parts[2]}`;
+    contentStart = 3;
+  } else {
+    packageName = parts[1];
+    contentStart = 2;
+  }
+  if (!PACKAGE_NAME_RE.test(packageName) || !bundles.has(packageName)) {
+    fail(`archive file is not explicitly bundled: ${name}`);
+  }
+  const content = parts.slice(contentStart);
+  if (content.includes('node_modules')) fail(`archive contains an undeclared nested dependency: ${name}`);
+  if (type === '0' && content.length === 0) fail(`archive bundled package path is not a file: ${name}`);
+  return true;
+}
+
 function validatePackage(entries) {
   const files = new Map(entries.filter((entry) => entry.type === '0').map((entry) => [entry.name, entry.content]));
   for (const required of REQUIRED_FILES) if (!files.has(required)) fail(`archive is missing package/${required}`);
@@ -110,8 +147,15 @@ function validatePackage(entries) {
   if (!isPlainObject(manifest) || manifest.name !== PACKAGE_NAME) fail(`archive package name must be ${PACKAGE_NAME}`);
   if (typeof manifest.version !== 'string' || !VERSION_RE.test(manifest.version)) fail('archive package version is invalid');
   if (!Array.isArray(manifest.files) || manifest.files.some((value) => typeof value !== 'string')) fail('archive package files must be a string array');
-  for (const name of files.keys()) {
+  const bundles = bundledDependencies(manifest);
+  for (const entry of entries) {
+    const { name } = entry;
     if (name === 'package.json') continue;
+    if (name === 'node_modules' || name.startsWith('node_modules/')) {
+      validateBundledPath(name, entry.type, bundles);
+      continue;
+    }
+    if (entry.type !== '0') continue;
     if (!manifest.files.some((listed) => name === listed || name.startsWith(`${listed.replace(/\/$/, '')}/`))) fail(`archive file is not listed by package files: ${name}`);
     if (name.startsWith('test/') || name.startsWith('node_modules/') || name.startsWith('.git/')) fail(`archive contains an unexpected package file: ${name}`);
   }

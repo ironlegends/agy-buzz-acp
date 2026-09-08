@@ -1042,3 +1042,25 @@ test('keeps a session turn active through provider work and fails closed after c
     assert.match(failed.error.message, /context lost|resume/i);
     assert.equal(promptCalls, 1);
 });
+
+test('does not advertise or probe steering without explicit hook configuration', async () => {
+  const app = startMemoryServer({
+    sessionFactory: () => ({ prompt: async () => 'unused', cancel() {}, close() {} }),
+    publisherFactory: () => ({ publish: async () => ({ status: 'sent' }) })
+  });
+  try {
+    app.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: 1 } });
+    const init = await app.waitFor((message) => message.id === 1);
+    assert.equal(init.result._meta.steering.supported, false);
+    app.send({ jsonrpc: '2.0', id: 2, method: 'session/new', params: { cwd: root } });
+    const created = await app.waitFor((message) => message.id === 2);
+    app.send({ jsonrpc: '2.0', id: 3, method: '_session/steering', params: {
+      sessionId: created.result.sessionId, prompt: 'must stay disabled'
+    } });
+    const response = await app.waitFor((message) => message.id === 3);
+    assert.notEqual(response.error.code, -32601);
+    assert.match(response.error.message, /steering|hook/i);
+  } finally {
+    app.close();
+  }
+});

@@ -37,4 +37,24 @@ A pending or uncertain operation is a recovery boundary, not evidence that nothi
 
 ## Shutdown limitation in Buzz
 
-Durable recovery requires an orderly adapter shutdown. The Buzz shutdown path inspected for the local installation kills the ACP child without closing its stdin first. Even a successfully delivered turn can therefore leave a session lock behind and block the next launch. Do not enable durable state expecting automatic recovery from that shutdown path. A future integration must demonstrate lock cleanup after a delivered turn and restore the same conversation without replay or duplicate publication. Do not remove locks automatically to hide this limitation.
+The previous directory-lock implementation required orderly adapter shutdown. Official Buzz can terminate the ACP child without an EOF grace period, leaving those old directory locks behind. Version 0.5.3 uses a native OS lock and does not depend on an EOF grace period or an ACP sidecar patch. Existing directory locks still require controlled migration and are never automatically removed.
+
+Activation requires evidence from official Buzz: a delivered, checkpointed turn must resume the same conversation after restart, while interrupted or uncertain work remains blocked. Native lock release alone is not that evidence. See [recovery with official Buzz](OFFICIAL_BUZZ_RECOVERY.md) for the provider-retirement and validation contract. Provider availability, direct-child exit and arbitrary external tool effects are separate concerns.
+
+## Native steering
+
+The `_session/steering` extension is advertised only when the dedicated PostInvocation hook and the exclusive injector precondition are both explicitly configured with `AGY_STEER_HOOK_CONFIGURED=1` and `AGY_STEER_INJECTOR_EXCLUSIVE=1`, together with a valid `AGY_STEER_OWNER` or `AGY_SESSION_OWNER`. The adapter provisions a private, channel-scoped bridge before the first provider spawn; the provider conversation is bound to that bridge only after its matching `init` event. Claims remain unavailable until that binding, then require the hook acknowledgement and a later matching `user_input` step.
+
+Buzz sends `_session/steering` prompts as ACP arrays of text content blocks. The adapter validates those blocks, concatenates their text within the bounded limit, and rejects other content types.
+
+The adapter publishes the response segment after the last confirmed correction. It never publishes the provider's cumulative `result.response` after steering, never kills the provider to inject a message, and never returns `startedNewTurn` in version 1. A result, provider exit, missing segment, claim timeout, or delivery boundary before consumption makes the steering state blocked; Buzz receives an application error other than `-32601` so its normal dispatch can retain the message for a later decision. A correction cannot be replayed automatically after an ambiguous claim.
+
+## Version 0.5.3 validation note
+
+Version 0.5.3 adds the native lock dependency, the opt-in PostInvocation steering hook, and the corresponding blocked-state protections. The dependency and its native support packages are bundled in the extracted npm archive.
+
+The fixture suite for this candidate recorded 248 tests: 247 passed, one was skipped, and none failed. These tests use synthetic providers and publishers. They do not establish provider availability, account eligibility, official Buzz behavior or installed UI rendering.
+
+A separate Windows run through the official Buzz application exercised the installed 0.5.3 adapter. It confirmed a steering correction delivered without cancellation or the cancel-and-merge fallback, one corrected response, a ready state after completion, and a subsequent agent restart that resumed the same provider conversation without replay or duplicate publication. The readback confirmed completed outbox delivery with no uncertain record.
+
+This real-installation evidence covers a completed-turn restart. It does not prove recovery from an interrupted external effect, arbitrary descendant-process cleanup, power loss or exactly-once execution under every failure mode. The run did not expose an explicit EOF line, so no EOF-specific claim is made.

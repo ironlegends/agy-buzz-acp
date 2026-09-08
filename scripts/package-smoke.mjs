@@ -4,7 +4,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const timeoutMs = 30000;
@@ -64,6 +64,22 @@ async function main() {
     const packageJson = JSON.parse(await readFile(join(packageRoot, 'package.json'), 'utf8'));
     assert.equal(packageJson.version, metadata[0].version);
 
+    // Exercise the extracted native binding without npm install or repository
+    // module resolution. Merely loading the ACP command is not a lock test.
+    const nativeProbe = join(tempRoot, 'native-check.mjs');
+    await writeFile(nativeProbe, `
+      import assert from 'node:assert/strict';
+      import { acquireNativeLock } from ${JSON.stringify(pathToFileURL(join(packageRoot, 'src/native-lock.js')).href)};
+      const path = ${JSON.stringify(join(tempRoot, 'packaged.lock'))};
+      const first = await acquireNativeLock(path);
+      await assert.rejects(acquireNativeLock(path));
+      await first.release();
+      const second = await acquireNativeLock(path);
+      await second.release();
+    `);
+    const nativeCheck = runNode(packageRoot, '../native-check.mjs');
+    assert.equal(nativeCheck.status, 0, `packaged native lock failed with status ${nativeCheck.status}`);
+
     const handshake = runNode(packageRoot, 'bin/agy-buzz-acp.js', [], `${JSON.stringify({
       jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: 2 }
     })}\n`);
@@ -114,7 +130,7 @@ async function main() {
     const installArgs = ['install', '--archive', archive, '--sha256', digest,
       '--root', join(tempRoot, 'runtime'), '--harness', harnessFile];
     const installPlan = runNode(packageRoot, 'bin/agy-buzz-manage.js', installArgs);
-    assert.equal(installPlan.status, 0, 'packaged install planning failed');
+    assert.equal(installPlan.status, 0, `packaged install planning failed: ${installPlan.stderr}`);
     assert.equal(await readFile(harnessFile, 'utf8'), harnessBytes, 'planning changed the harness');
     const installed = runNode(packageRoot, 'bin/agy-buzz-manage.js', [...installArgs, '--apply']);
     assert.equal(installed.status, 0, 'packaged install failed');
@@ -126,7 +142,7 @@ async function main() {
     assert.equal(await readFile(harnessFile, 'utf8'), harnessBytes, 'rollback did not restore the original configuration');
     console.log(JSON.stringify({ package: packageJson.name, version: packageJson.version,
       archive: 'extracted', handshake: 'PASS', doctor: 'PASS', recovery: 'PASS', setup: 'PASS', models: 'PASS', manage: 'PASS',
-      providerCalls: 0, publications: 0 }));
+      nativeLock: 'PASS', providerCalls: 0, publications: 0 }));
   } finally {
     await rm(tempRoot, { recursive: true, force: true });
     await rm(packDestination, { recursive: true, force: true });

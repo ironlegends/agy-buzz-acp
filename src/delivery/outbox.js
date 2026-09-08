@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
-import { chmod, mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readFile, readdir, rename, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { acquireNativeLock } from '../native-lock.js';
 
 const OWNER_RE = /^[0-9a-f]{64}$/i;
 const CHANNEL_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -109,12 +110,13 @@ export class DeliveryOutbox {
   async retry(id, { publish, owner } = {}) {
     if (!validId(id)) return { status: 'blocked', reason: 'invalid-id' };
     if (!this.enabled || typeof owner !== 'string' || owner.toLowerCase() !== this.owner) return { status: 'blocked', reason: 'owner-mismatch' };
-    const lock = join(this.dir, `${id}.lock`);
+    const lockPath = join(this.dir, `${id}.lock`);
+    let lock;
     try {
-      await mkdir(lock, { recursive: false });
+      lock = await acquireNativeLock(lockPath);
     } catch (error) {
-      if (error?.code === 'EEXIST') return { status: 'blocked', reason: 'busy' };
-      throw error;
+      if (['AGY_NATIVE_LOCK_BUSY', 'AGY_NATIVE_LOCK_LEGACY'].includes(error?.code)) return { status: 'blocked', reason: 'busy' };
+      return { status: 'blocked', reason: 'lock-unavailable' };
     }
     try {
       const record = await this.get(id);
@@ -132,7 +134,7 @@ export class DeliveryOutbox {
       await this.update(id, { status, ...(result?.eventId ? { eventId: result.eventId } : {}) });
       return { status, ...(result?.eventId ? { eventId: result.eventId } : {}) };
     } finally {
-      await rm(lock, { recursive: true, force: true });
+      await lock.release();
     }
   }
 }

@@ -131,7 +131,8 @@ test('restores a durable association only after a fully delivered turn', async (
       sessionStateFactory: () => state,
       sessionFactory: () => {
         const session = { trusted: null, setTrustedConversation(id) { this.trusted = id; }, hasConfirmedConversation: () => true,
-          getConversationId: () => 'conversation-1', prompt: async () => 'answer', cancel() {}, close() {} };
+          getConversationId: () => 'conversation-1', retireForCheckpoint: async () => 'conversation-1',
+          prompt: async () => 'answer', cancel() {}, close() {} };
         sessions.push(session);
         return session;
       },
@@ -197,9 +198,13 @@ test('does not persist an unconfirmed terminal conversation after an orderly clo
   const output = new PassThrough();
   const diagnostics = new PassThrough();
   const state = new SessionState({ dir, owner, relay: 'wss://relay.example.test' });
+  let promptCalls = 0;
+  let wire = '';
+  output.setEncoding('utf8');
+  output.on('data', (chunk) => { wire += chunk; });
   const server = createAcpServer({ input, output, diagnostics, sessionStateFactory: () => state,
     identityFactory: async () => owner,
-    sessionFactory: () => ({ prompt: async () => 'answer', getConversationId: () => 'conversation-1', hasConfirmedConversation: () => false, cancel() {}, close() {} }),
+    sessionFactory: () => ({ prompt: async () => { promptCalls += 1; return 'answer'; }, getConversationId: () => 'conversation-1', hasConfirmedConversation: () => false, cancel() {}, close() {} }),
     publisherFactory: () => ({ publish: async () => ({ status: 'sent', eventId: 'aa'.repeat(32) }) })
   });
   try {
@@ -211,11 +216,135 @@ test('does not persist an unconfirmed terminal conversation after an orderly clo
     const raw = JSON.parse(await readFile(state.path(channelId), 'utf8'));
     assert.equal(raw.status, 'blocked');
     assert.equal(raw.conversationId, null);
+    await server.handle({ jsonrpc: '2.0', id: 4, method: 'session/prompt', params: { sessionId, prompt } });
+    const nextResponse = wire.trim().split('\n').map((line) => JSON.parse(line)).find((message) => message.id === 4);
+    assert.ok(nextResponse?.error, `expected terminal error, got ${JSON.stringify(nextResponse)}`);
+    assert.match(nextResponse.error.message, /blocked after an incomplete turn|state association/i);
+    assert.equal(promptCalls, 1);
+    assert.equal((JSON.parse(await readFile(state.path(channelId), 'utf8'))).status, 'blocked');
     await server.close();
     const next = new SessionState({ dir, owner, relay: 'wss://relay.example.test' });
     try { await assert.rejects(next.load(scope), /blocked after an incomplete turn/); }
     finally { await next.release(); }
   } finally { await state.release(); await rm(dir, { recursive: true, force: true }); }
+});
+
+test('terminally blocks an ACP entry after uncertain publication before the next external effect', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'agy-session-uncertain-'));
+  const input = new PassThrough();
+  const output = new PassThrough();
+  const diagnostics = new PassThrough();
+  const state = new SessionState({ dir, owner, relay: 'wss://relay.example.test' });
+  const publications = [];
+  let promptCalls = 0;
+  let wire = '';
+  output.setEncoding('utf8');
+  output.on('data', (chunk) => { wire += chunk; });
+  const server = createAcpServer({ input, output, diagnostics, sessionStateFactory: () => state,
+    identityFactory: async () => owner,
+    sessionFactory: () => ({
+      prompt: async () => { promptCalls += 1; return 'answer'; },
+      getConversationId: () => 'conversation-1', hasConfirmedConversation: () => true,
+      cancel() {}, close() {}
+    }),
+    publisherFactory: () => ({ publish: async (message) => { publications.push(message); return { status: 'uncertain' }; } })
+  });
+  try {
+    await server.handle({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: 1 } });
+    await server.handle({ jsonrpc: '2.0', id: 2, method: 'session/new', params: { cwd: dir } });
+    const sessionId = [...server.sessions.keys()][0];
+    await server.handle({ jsonrpc: '2.0', id: 3, method: 'session/prompt', params: { sessionId, prompt } });
+    assert.equal(promptCalls, 1);
+    assert.equal(publications.length, 1);
+    assert.equal((JSON.parse(await readFile(state.path(channelId), 'utf8'))).status, 'blocked');
+
+    await server.handle({ jsonrpc: '2.0', id: 4, method: 'session/prompt', params: { sessionId, prompt } });
+    const next = wire.trim().split('\n').map((line) => JSON.parse(line)).find((message) => message.id === 4);
+    assert.ok(next?.error, `expected terminal error, got ${JSON.stringify(next)}`);
+    assert.match(next.error.message, /blocked after an incomplete turn/i);
+    assert.equal(promptCalls, 1);
+    assert.equal(publications.length, 1);
+    assert.equal((JSON.parse(await readFile(state.path(channelId), 'utf8'))).status, 'blocked');
+  } finally { await server.close(); await state.release(); await rm(dir, { recursive: true, force: true }); }
+});
+
+test('terminally blocks an ACP entry after a provider error before the next external effect', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'agy-session-provider-error-'));
+  const input = new PassThrough();
+  const output = new PassThrough();
+  const diagnostics = new PassThrough();
+  const state = new SessionState({ dir, owner, relay: 'wss://relay.example.test' });
+  let promptCalls = 0;
+  let publisherCalls = 0;
+  let wire = '';
+  output.setEncoding('utf8');
+  output.on('data', (chunk) => { wire += chunk; });
+  const server = createAcpServer({ input, output, diagnostics, sessionStateFactory: () => state,
+    identityFactory: async () => owner,
+    sessionFactory: () => ({
+      prompt: async () => { promptCalls += 1; throw new Error('provider exploded'); },
+      cancel() {}, close() {}
+    }),
+    publisherFactory: () => ({ publish: async () => { publisherCalls += 1; return { status: 'sent' }; } })
+  });
+  try {
+    await server.handle({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: 1 } });
+    await server.handle({ jsonrpc: '2.0', id: 2, method: 'session/new', params: { cwd: dir } });
+    const sessionId = [...server.sessions.keys()][0];
+    await server.handle({ jsonrpc: '2.0', id: 3, method: 'session/prompt', params: { sessionId, prompt } });
+    await server.handle({ jsonrpc: '2.0', id: 4, method: 'session/prompt', params: { sessionId, prompt } });
+    const next = wire.trim().split('\n').map((line) => JSON.parse(line)).find((message) => message.id === 4);
+    assert.ok(next?.error, `expected terminal error, got ${JSON.stringify(next)}`);
+    assert.match(next.error.message, /blocked after an incomplete turn/i);
+    assert.equal(promptCalls, 1);
+    assert.equal(publisherCalls, 0);
+    assert.equal((JSON.parse(await readFile(state.path(channelId), 'utf8'))).status, 'blocked');
+  } finally { await server.close(); await state.release(); await rm(dir, { recursive: true, force: true }); }
+});
+
+test('terminally blocks an ACP entry after cancellation before the next external effect', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'agy-session-cancelled-'));
+  const input = new PassThrough();
+  const output = new PassThrough();
+  const diagnostics = new PassThrough();
+  const state = new SessionState({ dir, owner, relay: 'wss://relay.example.test' });
+  let promptCalls = 0;
+  let publisherCalls = 0;
+  let rejectPrompt;
+  let promptStartedResolve;
+  const promptStarted = new Promise((resolve) => { promptStartedResolve = resolve; });
+  let wire = '';
+  output.setEncoding('utf8');
+  output.on('data', (chunk) => { wire += chunk; });
+  const server = createAcpServer({ input, output, diagnostics, sessionStateFactory: () => state,
+    identityFactory: async () => owner,
+    sessionFactory: () => ({
+      prompt: async () => {
+        promptCalls += 1;
+        promptStartedResolve();
+        return new Promise((resolve, reject) => { rejectPrompt = reject; });
+      },
+      cancel() { rejectPrompt?.(Object.assign(new Error('cancelled'), { code: 'CANCELLED' })); },
+      close() {}
+    }),
+    publisherFactory: () => ({ publish: async () => { publisherCalls += 1; return { status: 'sent' }; } })
+  });
+  try {
+    await server.handle({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: 1 } });
+    await server.handle({ jsonrpc: '2.0', id: 2, method: 'session/new', params: { cwd: dir } });
+    const sessionId = [...server.sessions.keys()][0];
+    const first = server.handle({ jsonrpc: '2.0', id: 3, method: 'session/prompt', params: { sessionId, prompt } });
+    await promptStarted;
+    await server.handle({ jsonrpc: '2.0', method: 'session/cancel', params: { sessionId } });
+    await first;
+    await server.handle({ jsonrpc: '2.0', id: 4, method: 'session/prompt', params: { sessionId, prompt } });
+    const next = wire.trim().split('\n').map((line) => JSON.parse(line)).find((message) => message.id === 4);
+    assert.ok(next?.error, `expected terminal error, got ${JSON.stringify(next)}`);
+    assert.match(next.error.message, /blocked after an incomplete turn/i);
+    assert.equal(promptCalls, 1);
+    assert.equal(publisherCalls, 0);
+    assert.equal((JSON.parse(await readFile(state.path(channelId), 'utf8'))).status, 'blocked');
+  } finally { await server.close(); await state.release(); await rm(dir, { recursive: true, force: true }); }
 });
 
 test('reserves a session before asynchronous identity checks race', async () => {
