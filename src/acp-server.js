@@ -12,7 +12,6 @@ import { listModels, modelConfigOptions } from './models.js';
 import { createSteeringCoordinator, inspectSteeringBridge, MAX_STEERING_TEXT_LENGTH } from './steering.js';
 
 const JSON_RPC = '2.0';
-const TERMINAL_SESSION_STATE_MESSAGE = 'agy session state is blocked after an incomplete turn';
 const TERMINAL_SESSION_CONTEXT_MESSAGE = 'agy session context lost; resume unsupported';
 const STEERING_RPC_CODE = -32004;
 const STEERING_UNCERTAIN_MESSAGE = 'agy steering outcome is uncertain';
@@ -138,10 +137,10 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
       ownerId: location.ownerId,
       channelId
     });
-    if (status.blocked) {
-      entry.stateError ??= 'agy steering is durably blocked';
-      throw steeringRpcError(entry.stateError);
-    }
+    // The bridge on disk is authoritative and is inspected on every prompt. Copying
+    // the verdict onto the pool entry would keep masking a repaired bridge for the
+    // whole life of this process, long after the durable state became sound again.
+    if (status.blocked) throw steeringRpcError('agy steering is durably blocked');
   }
 
   async function ensureSteering(entry, channelId) {
@@ -174,8 +173,12 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
     return coordinator;
   }
 
+  // With durable session state the record on disk already carries the block, and
+  // `session/prompt` reads it again on every turn. Only the memory-only mode has no
+  // record to re-read, so it is the only mode that still needs a sticky marker.
   const blockEntry = (entry) => {
-    entry.stateError ??= sessionState?.enabled ? TERMINAL_SESSION_STATE_MESSAGE : TERMINAL_SESSION_CONTEXT_MESSAGE;
+    if (sessionState?.enabled) return;
+    entry.stateError ??= TERMINAL_SESSION_CONTEXT_MESSAGE;
   };
 
   const write = (message) => output.write(`${JSON.stringify(message)}\n`);
@@ -212,7 +215,7 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
             mcpCapabilities: { http: false, sse: false }
           },
           _meta: { steering: { supported: steeringCapability } },
-            agentInfo: { name: 'agy-buzz-acp', version: '0.5.4' }
+            agentInfo: { name: 'agy-buzz-acp', version: '0.5.5' }
         }));
         return;
       }
@@ -327,8 +330,11 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
               throw Object.assign(new Error('agy channel session is already owned'), { rpcCode: -32002, rpcMessage: 'agy channel session is already owned' });
             }
             channelSessions.set(buzzContext.channelId, params.sessionId);
+            // Every turn re-reads the record: `load` is the guard that refuses a block
+            // left by an incomplete turn. Binding the trusted conversation stays a
+            // one-off, because the provider refuses it once a child is running.
+            const saved = await sessionState.load(stateScope);
             if (!entry.bound) {
-              const saved = await sessionState.load(stateScope);
               if (saved) session.setTrustedConversation?.(saved.conversationId);
               entry.bound = true;
             }
@@ -433,7 +439,8 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
                 blockEntry(entry);
               }
             } catch (error) {
-              entry.stateError = 'agy session association could not be saved';
+              // `save` did not run, so the record on disk stays blocked and the next
+              // turn reads it. A sticky marker here would only hide a later repair.
               report('session association could not be saved');
             }
           } else if (status === 'sent' && !sessionState?.enabled) {

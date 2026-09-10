@@ -11,7 +11,14 @@ for (const retirementFails of [false, true]) {
     let providerCalls = 0;
     let retirementCalls = 0;
     const state = { enabled: true, verifyIdentity: async () => {}, scope: async () => ({}),
-      load: async () => null, invalidate: async () => { record = 'blocked'; },
+      // Faithful to SessionState.load: a record left blocked by an incomplete turn is
+      // refused, which is what makes a failed retirement bite on the following turn.
+      load: async () => {
+        if (record === 'blocked') throw Object.assign(new Error('agy session state is blocked after an incomplete turn'),
+          { code: 'AGY_SESSION_STATE_BLOCKED', rpcMessage: 'agy session state is blocked after an incomplete turn' });
+        return null;
+      },
+      invalidate: async () => { record = 'blocked'; },
       save: async () => { assert.equal(retired, true, 'ready cannot precede provider exit'); record = 'ready'; },
       release: async () => {} };
     const server = createAcpServer({ input: new PassThrough(), output: new PassThrough(), diagnostics: new PassThrough(),
