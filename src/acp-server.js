@@ -9,7 +9,7 @@ import { createConfiguredOutbox } from './delivery/outbox.js';
 import { getBuzzPublicKey } from './delivery/identity.js';
 import { createConfiguredSessionState } from './session-state.js';
 import { listModels, modelConfigOptions } from './models.js';
-import { createSteeringCoordinator, inspectSteeringBridge, MAX_STEERING_TEXT_LENGTH } from './steering.js';
+import { createSteeringCoordinator, inspectSteeringBridge, reconcileSteeringBridge, MAX_STEERING_TEXT_LENGTH } from './steering.js';
 
 const JSON_RPC = '2.0';
 const TERMINAL_SESSION_CONTEXT_MESSAGE = 'agy session context lost; resume unsupported';
@@ -128,7 +128,38 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
     return { ownerId, rootDir, bridgeDir: join(rootDir, `channel-${bridgeKey}`), steeringSessionId };
   }
 
-  async function inspectExistingSteering(entry, channelId) {
+  // Channels this process blocked itself and has not saved since. A block this
+  // adapter created is still terminal: the turn behind it may have started the
+  // provider or left an ambiguous external effect, and only an operator can settle
+  // that. Reconciliation is for the opposite case, a block nobody is left to answer
+  // for, found on disk by a process that did not write it.
+  const channelsBlockedHere = new Set();
+
+  // Durable half of the same question, and the only one that survives a restart: an
+  // outbox record still `inflight` or `uncertain` means an external effect happened
+  // whose outcome nobody has settled. That block is not orphaned, it is waiting for
+  // an operator, and reconciliation must leave it exactly where it is.
+  const channelHasUnsettledDelivery = async (channelId) => {
+    if (!outbox?.enabled || typeof outbox.list !== 'function') return false;
+    let records;
+    try { records = await outbox.list(); }
+    catch { return true; }
+    return records.some((record) => record?.channelId === channelId &&
+      (record.status === 'uncertain' || record.status === 'inflight'));
+  };
+
+  // In-process half of the reconciliation guard. The other half is the session
+  // ownership lock, which no second adapter can hold at the same time; together they
+  // prove that durable state left blocked belongs to a turn that is already dead.
+  const channelBusyElsewhere = (channelId, sessionId) => {
+    for (const activeSessionId of activeTurns.keys()) {
+      if (activeSessionId === sessionId) continue;
+      if (sessions.get(activeSessionId)?.channelId === channelId) return true;
+    }
+    return false;
+  };
+
+  async function inspectExistingSteering(entry, channelId, sessionId) {
     if (!steeringCapability || steeringFactory) return;
     const location = steeringLocation(channelId);
     if (!OWNER_RE.test(location.ownerId ?? '')) return;
@@ -140,7 +171,22 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
     // The bridge on disk is authoritative and is inspected on every prompt. Copying
     // the verdict onto the pool entry would keep masking a repaired bridge for the
     // whole life of this process, long after the durable state became sound again.
-    if (status.blocked) throw steeringRpcError('agy steering is durably blocked');
+    if (!status.blocked) return;
+    if (channelsBlockedHere.has(channelId) || channelBusyElsewhere(channelId, sessionId) ||
+        await channelHasUnsettledDelivery(channelId)) {
+      throw steeringRpcError('agy steering is durably blocked');
+    }
+    const { archivedTo } = await reconcileSteeringBridge({
+      bridgeDir: location.bridgeDir,
+      ownerId: location.ownerId,
+      channelId
+    });
+    if (!archivedTo) throw steeringRpcError('agy steering is durably blocked');
+    // The coordinator cached on the entry still points at the directory that was just
+    // renamed. Drop it so `ensureSteering` builds one on the bridge that replaces it.
+    entry.steering = null;
+    entry.session.setSteeringCoordinator?.(null);
+    report(`steering bridge reconciled channel=${channelId} archived=${archivedTo}`);
   }
 
   async function ensureSteering(entry, channelId) {
@@ -215,7 +261,7 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
             mcpCapabilities: { http: false, sse: false }
           },
           _meta: { steering: { supported: steeringCapability } },
-            agentInfo: { name: 'agy-buzz-acp', version: '0.5.5' }
+            agentInfo: { name: 'agy-buzz-acp', version: '0.5.6' }
         }));
         return;
       }
@@ -313,7 +359,7 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
           throw Object.assign(new Error('agy session channel scope cannot change'), { rpcCode: -32602, rpcMessage: 'agy session channel scope cannot change' });
         }
         entry.channelId ??= buzzContext.channelId;
-        if (steeringCapability) await inspectExistingSteering(entry, buzzContext.channelId);
+        if (steeringCapability) await inspectExistingSteering(entry, buzzContext.channelId, params.sessionId);
         const controller = new AbortController();
         activeTurns.set(params.sessionId, controller);
         let stateScope = null;
@@ -333,12 +379,28 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
             // Every turn re-reads the record: `load` is the guard that refuses a block
             // left by an incomplete turn. Binding the trusted conversation stays a
             // one-off, because the provider refuses it once a child is running.
-            const saved = await sessionState.load(stateScope);
+            let saved;
+            try {
+              saved = await sessionState.load(stateScope);
+            } catch (error) {
+              // A record left blocked by a turn that never reached `save` is repaired
+              // here instead of waiting for an operator. The guard stays closed while
+              // another turn of this adapter is running on the channel.
+              if (error?.code !== 'AGY_SESSION_STATE_BLOCKED' ||
+                  channelsBlockedHere.has(buzzContext.channelId) ||
+                  channelBusyElsewhere(buzzContext.channelId, params.sessionId) ||
+                  await channelHasUnsettledDelivery(buzzContext.channelId)) throw error;
+              const outcome = await sessionState.reconcile(stateScope);
+              if (!outcome.reconciled) throw error;
+              report(`session record reconciled channel=${buzzContext.channelId} conversation=${outcome.conversationId ?? 'none'}`);
+              saved = await sessionState.load(stateScope);
+            }
             if (!entry.bound) {
               if (saved) session.setTrustedConversation?.(saved.conversationId);
               entry.bound = true;
             }
             await sessionState.invalidate(stateScope);
+            channelsBlockedHere.add(buzzContext.channelId);
           }
           if (steeringCapability) await ensureSteering(entry, buzzContext.channelId);
           if (outbox?.configurationError) {
@@ -434,6 +496,7 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
                 }
                 if (controller.signal.aborted) throw new Error('checkpoint cancelled');
                 await sessionState.save(stateScope, conversationId);
+                channelsBlockedHere.delete(buzzContext.channelId);
                 turnSafe = true;
               } else {
                 blockEntry(entry);

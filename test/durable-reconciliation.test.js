@@ -1,0 +1,289 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
+import { PassThrough } from 'node:stream';
+import { createAcpServer } from '../src/acp-server.js';
+import { SessionState } from '../src/session-state.js';
+import { isolatedServerOptions } from '../scripts/environment-support.js';
+
+const owner = 'ab'.repeat(32);
+const channelId = '123e4567-e89b-12d3-a456-426614174000';
+const relay = 'wss://relay.example.test/socket';
+const replyTo = 'f188a24b35cb6f2cc4cf4144f92eb01d25450441ef2afe7cea6075c4833af14f';
+const prompt = [
+  { type: 'text', text: '[Base]\nPlatform context.' },
+  { type: 'text', text: `[Context]\nChannel: coordination (#${channelId})\nThread root: ${replyTo}\n[Buzz event: test]\nanswer` }
+];
+
+function wireReader(output) {
+  let wire = '';
+  output.setEncoding('utf8');
+  output.on('data', (chunk) => { wire += chunk; });
+  return (id) => wire.trim().split('\n').map((line) => JSON.parse(line)).find((message) => message.id === id);
+}
+
+function diagnosticReader(diagnostics) {
+  let text = '';
+  diagnostics.setEncoding('utf8');
+  diagnostics.on('data', (chunk) => { text += chunk; });
+  return () => text;
+}
+
+async function durableHarness() {
+  const dir = await mkdtemp(join(tmpdir(), 'agy-reconcile-'));
+  const state = new SessionState({ dir, owner, relay });
+  const scope = await state.scope({ channelId, cwd: dir, model: 'gemini-3.8-flash-high' });
+  const output = new PassThrough();
+  const diagnostics = new PassThrough();
+  const find = wireReader(output);
+  const readDiagnostics = diagnosticReader(diagnostics);
+  const counters = { prompts: 0 };
+  const trusted = [];
+  const server = createAcpServer({
+    input: new PassThrough(), output, diagnostics,
+    sessionStateFactory: () => state,
+    outboxFactory: () => ({ enabled: false, begin: async () => null, update: async () => null }),
+    identityFactory: async () => owner,
+    sessionFactory: () => ({
+      prompt: async () => { counters.prompts += 1; return 'answer'; },
+      setTrustedConversation(value) { trusted.push(value); },
+      getConversationId: () => 'conversation-1',
+      hasConfirmedConversation: () => true,
+      retireForCheckpoint: async () => 'conversation-1',
+      cancel() {}, close() {}
+    }),
+    publisherFactory: () => ({ publish: async () => ({ status: 'sent', eventId: 'cd'.repeat(32) }) })
+  });
+  await server.handle({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: 1 } });
+  await server.handle({ jsonrpc: '2.0', id: 2, method: 'session/new', params: { cwd: dir } });
+  const sessionId = [...server.sessions.keys()][0];
+  let nextId = 3;
+  const turn = async () => {
+    const id = nextId++;
+    await server.handle({ jsonrpc: '2.0', id, method: 'session/prompt', params: { sessionId, prompt } });
+    return find(id);
+  };
+  const record = async () => JSON.parse(await readFile(state.path(channelId), 'utf8'));
+  const dispose = async () => {
+    await server.close();
+    await state.release();
+    await rm(dir, { recursive: true, force: true });
+  };
+  return { state, scope, turn, counters, trusted, record, readDiagnostics, dispose };
+}
+
+test('a record left blocked by a dead turn is reconciled on the next prompt', async () => {
+  const { state, scope, turn, counters, record, readDiagnostics, dispose } = await durableHarness();
+  try {
+    assert.equal((await turn()).result.stopReason, 'end_turn');
+    assert.equal((await record()).conversationId, 'conversation-1');
+
+    // Exactly what an idle-killed turn leaves behind: `invalidate` ran, `save` never did.
+    await state.invalidate(scope);
+    assert.equal((await record()).status, 'blocked');
+
+    const resumed = await turn();
+    assert.ok(resumed?.result, `expected the blocked record to be reconciled, got ${JSON.stringify(resumed)}`);
+    assert.equal(resumed.result.stopReason, 'end_turn');
+    assert.equal(counters.prompts, 2, 'the provider must run once the block is reconciled');
+    assert.equal((await record()).status, 'ready');
+    assert.equal((await record()).conversationId, 'conversation-1', 'reconciliation must resume, not discard');
+    assert.match(readDiagnostics(), /session record reconciled channel=123e4567-e89b-12d3-a456-426614174000 conversation=conversation-1/);
+  } finally { await dispose(); }
+});
+
+test('a record blocked before any conversation existed is removed rather than resumed', async () => {
+  const { state, scope, turn, counters, trusted, record, readDiagnostics, dispose } = await durableHarness();
+  try {
+    // `invalidate` on a missing record writes `conversationId: null`: the turn died
+    // before the provider ever produced one, so there is nothing to resume.
+    await state.invalidate(scope);
+    assert.equal((await record()).conversationId, null);
+
+    const resumed = await turn();
+    assert.ok(resumed?.result, `expected a fresh start, got ${JSON.stringify(resumed)}`);
+    assert.equal(counters.prompts, 1);
+    assert.deepEqual(trusted, [], 'no stale conversation may be bound as trusted');
+    assert.equal((await record()).status, 'ready');
+    assert.match(readDiagnostics(), /session record reconciled channel=[0-9a-f-]+ conversation=none/);
+  } finally { await dispose(); }
+});
+
+test('reconciliation refuses a blocked record whose scope does not match', async () => {
+  const { state, scope, turn, counters, dispose } = await durableHarness();
+  try {
+    await turn();
+    await state.invalidate(scope);
+    const blocked = JSON.parse(await readFile(state.path(channelId), 'utf8'));
+    blocked.scope = { ...blocked.scope, model: 'some-other-model' };
+    await writeFile(state.path(channelId), `${JSON.stringify(blocked)}\n`, { encoding: 'utf8', mode: 0o600 });
+
+    const refused = await turn();
+    assert.ok(refused?.error, `expected refusal, got ${JSON.stringify(refused)}`);
+    assert.match(refused.error.message, /scope mismatch/i);
+    assert.equal(counters.prompts, 1, 'a foreign record must not be reconciled');
+  } finally { await dispose(); }
+});
+
+async function steeringHarness() {
+  const dir = await mkdtemp(join(tmpdir(), 'agy-reconcile-steer-'));
+  const output = new PassThrough();
+  const diagnostics = new PassThrough();
+  const find = wireReader(output);
+  const readDiagnostics = diagnosticReader(diagnostics);
+  const counters = { prompts: 0 };
+  const gates = [];
+  const server = createAcpServer({
+    input: new PassThrough(), output, diagnostics,
+    ...isolatedServerOptions({
+      sessionFactory: () => ({
+        prompt: async () => {
+          counters.prompts += 1;
+          const gate = gates.shift();
+          if (gate) await gate;
+          return 'answer';
+        },
+        setSteeringCoordinator() {}, getConversationId: () => 'conversation-1',
+        retireForCheckpoint: async () => 'conversation-1',
+        cancel() {}, close() {}
+      })
+    }),
+    steeringSupported: true,
+    steeringConfig: { hookConfigured: true, injectorExclusive: true, ownerId: owner, rootDir: dir }
+  });
+  await server.handle({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: 1 } });
+  let nextId = 2;
+  const newSession = async () => {
+    await server.handle({ jsonrpc: '2.0', id: nextId++, method: 'session/new', params: { cwd: dir } });
+    return [...server.sessions.keys()].at(-1);
+  };
+  const sessionId = await newSession();
+  const promptOn = (session) => {
+    const id = nextId++;
+    const settled = server.handle({ jsonrpc: '2.0', id, method: 'session/prompt', params: { sessionId: session, prompt } });
+    return { settled, read: () => find(id) };
+  };
+  const turn = async () => {
+    const call = promptOn(sessionId);
+    await call.settled;
+    return call.read();
+  };
+  const bridgeDir = join(dir, `channel-${createHash('sha256').update(`${owner}:${channelId}`).digest('hex')}`);
+  const setGuard = async (guardBlocked) => {
+    const statePath = join(bridgeDir, 'state.json');
+    const current = JSON.parse(await readFile(statePath, 'utf8'));
+    await writeFile(statePath, `${JSON.stringify({ ...current, guardBlocked })}\n`, { encoding: 'utf8', mode: 0o600 });
+  };
+  const archives = async () => (await readdir(dir)).filter((name) => name.includes('-archived-'));
+  const dispose = async () => {
+    await server.close();
+    await rm(dir, { recursive: true, force: true });
+  };
+  return { turn, promptOn, newSession, counters, gates, setGuard, archives, bridgeDir, sessionId, readDiagnostics, dispose };
+}
+
+test('a bridge left blocked by a dead turn is archived and rebuilt on the next prompt', async () => {
+  const { turn, counters, setGuard, archives, bridgeDir, readDiagnostics, dispose } = await steeringHarness();
+  try {
+    assert.equal((await turn()).result.stopReason, 'end_turn');
+    await setGuard(true);
+
+    const resumed = await turn();
+    assert.ok(resumed?.result, `expected the blocked bridge to be reconciled, got ${JSON.stringify(resumed)}`);
+    assert.equal(counters.prompts, 2, 'the provider must run once the bridge is reconciled');
+
+    const archived = await archives();
+    assert.equal(archived.length, 1, `expected exactly one archive, got ${JSON.stringify(archived)}`);
+    const kept = JSON.parse(await readFile(join(dirname(bridgeDir), archived[0], 'state.json'), 'utf8'));
+    assert.equal(kept.guardBlocked, true, 'the orphaned bridge must stay readable');
+    assert.equal(JSON.parse(await readFile(join(bridgeDir, 'state.json'), 'utf8')).guardBlocked, false);
+    assert.match(readDiagnostics(), /steering bridge reconciled channel=[0-9a-f-]+ archived=/);
+  } finally { await dispose(); }
+});
+
+test('a blocked bridge is not reconciled while another turn of this adapter holds the channel', async () => {
+  const { turn, promptOn, newSession, counters, gates, setGuard, archives, sessionId, dispose } = await steeringHarness();
+  try {
+    await turn();
+
+    // Hold one turn open on the channel, then block the bridge underneath it and let
+    // a second session reach the guard. That block is not orphaned: refuse, keep it.
+    let release;
+    gates.push(new Promise((resolve) => { release = resolve; }));
+    const held = promptOn(sessionId);
+    const deadline = Date.now() + 5000;
+    while (counters.prompts < 2) {
+      assert.ok(Date.now() < deadline, `the held turn never reached the provider: ${JSON.stringify(held.read())}`);
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    await setGuard(true);
+
+    const second = promptOn(await newSession());
+    await second.settled;
+    const refused = second.read();
+    assert.ok(refused?.error, `expected refusal, got ${JSON.stringify(refused)}`);
+    assert.match(refused.error.message, /steering is durably blocked/i);
+    assert.deepEqual(await archives(), [], 'a bridge held by a live turn must not be archived');
+
+    release();
+    await held.settled;
+    assert.ok(held.read()?.result, 'the held turn must still complete');
+  } finally { await dispose(); }
+});
+
+test('reconcile refuses to repair a record written for another scope', async () => {
+  // Reachability note: through `session/prompt` this branch is unreachable, because
+  // `load` raises the same mismatch before reconciliation is ever attempted. It is
+  // exercised here directly so the guard cannot be removed unnoticed.
+  const dir = await mkdtemp(join(tmpdir(), 'agy-reconcile-scope-'));
+  const state = new SessionState({ dir, owner, relay });
+  try {
+    const scope = await state.scope({ channelId, cwd: dir, model: 'gemini-3.8-flash-high' });
+    await state.save(scope, 'conversation-1');
+    await state.invalidate(scope);
+    const blocked = JSON.parse(await readFile(state.path(channelId), 'utf8'));
+    blocked.scope = { ...blocked.scope, model: 'some-other-model' };
+    await writeFile(state.path(channelId), `${JSON.stringify(blocked)}\n`, { encoding: 'utf8', mode: 0o600 });
+
+    await assert.rejects(() => state.reconcile(scope), /scope mismatch/i);
+    assert.equal(JSON.parse(await readFile(state.path(channelId), 'utf8')).status, 'blocked');
+  } finally {
+    await state.release();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('a block this process created stays terminal and is repaired without a restart', async () => {
+  const { state, turn, counters, record, dispose } = await durableHarness();
+  try {
+    const realSave = state.save.bind(state);
+    let failures = 0;
+    state.save = async (...args) => {
+      if (failures === 0) { failures += 1; throw new Error('disk is full'); }
+      return realSave(...args);
+    };
+
+    const first = await turn();
+    assert.ok(first?.result, `the turn itself must still answer, got ${JSON.stringify(first)}`);
+    assert.equal(failures, 1, 'the save failure must have been exercised');
+    assert.equal((await record()).status, 'blocked', 'a failed save leaves the record blocked');
+
+    // This adapter wrote that block, so reconciliation must not lift it: the turn
+    // behind it started the provider and its external effects are not settled.
+    const refused = await turn();
+    assert.ok(refused?.error, `expected refusal, got ${JSON.stringify(refused)}`);
+    assert.match(refused.error.message, /blocked after an incomplete turn/i);
+    assert.equal(counters.prompts, 1, 'the provider must not run again on a block from this process');
+
+    // The refusal must come from the record, not from a marker kept in pool memory:
+    // an operator repair on disk is honoured by the next prompt (lot 1, site C).
+    const scope = await state.scope({ channelId, cwd: state.dir, model: 'gemini-3.8-flash-high' });
+    await realSave(scope, 'conversation-1');
+    const resumed = await turn();
+    assert.ok(resumed?.result, `expected the repaired record to be honoured, got ${JSON.stringify(resumed)}`);
+    assert.equal(counters.prompts, 2);
+  } finally { await dispose(); }
+});

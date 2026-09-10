@@ -32,6 +32,16 @@ const nominalEvent = envelope([
   'Content: @Gemini please answer'
 ]);
 
+test('refuses an envelope with no Content line to separate header from body', () => {
+  // Without that boundary every line is sender territory, so no line can be trusted.
+  const headerOnly = envelope([
+    `Event ID: ${eventId}`,
+    `Channel: coordination (#${channelId})`,
+    'Kind: 9'
+  ]);
+  assert.equal(parseBuzzContext([base, topLevelContext, headerOnly]), null);
+});
+
 test('routes a top-level channel prompt to the triggering event', () => {
   assert.deepEqual(parseBuzzContext([base, topLevelContext, nominalEvent]),
     { channelId, replyTo: eventId });

@@ -181,6 +181,33 @@ export class SessionState {
     return record;
   }
 
+  // The cross-process guard is the ownership lock this instance already holds; the
+  // caller adds the in-process one by refusing to reconcile while another turn of
+  // this adapter is running on the channel. Under both, a record left `blocked` can
+  // only come from a turn that is already dead, so the conversation is resumed and
+  // the block is lifted. A record blocked before any conversation existed carries
+  // nothing to resume and is removed, which starts the next turn fresh.
+  async reconcile(scope) {
+    if (!this.enabled) return { reconciled: false, conversationId: null };
+    if (!validScope(scope)) throw stateError('agy session state scope is invalid');
+    await this.ensureOwnership(scope.channelId);
+    let raw;
+    try { raw = JSON.parse(await readFile(this.path(scope.channelId), 'utf8')); }
+    catch (error) {
+      if (error?.code === 'ENOENT') return { reconciled: false, conversationId: null };
+      throw stateError('agy session state is corrupted');
+    }
+    const current = sanitizeRecord(raw);
+    if (!sameScope(current.scope, scope)) throw stateError('agy session state scope mismatch', 'AGY_SESSION_SCOPE_MISMATCH');
+    if (current.status === 'ready') return { reconciled: false, conversationId: current.conversationId };
+    if (!CONVERSATION_RE.test(current.conversationId ?? '')) {
+      await rm(this.path(scope.channelId), { force: true });
+      return { reconciled: true, conversationId: null };
+    }
+    const restored = await this.save(scope, current.conversationId);
+    return { reconciled: true, conversationId: restored.conversationId };
+  }
+
   async invalidate(scope) {
     if (!this.enabled) return false;
     await this.ensureOwnership(scope.channelId);

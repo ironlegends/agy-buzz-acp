@@ -26,8 +26,11 @@ function eventDestination(prompt, channelId) {
   const eventText = prompt[indexes[0]].text
     .replace(XML_EVENT_MARKER, '')
     .replace(/<\/buzz-event>\s*$/i, '');
+  // No `Content:` line means no boundary between the envelope header and text the
+  // sender wrote, so there is nothing to trust: refuse instead of reading it all.
   const contentIndex = eventText.search(/^Content:/m);
-  const headerLength = contentIndex >= 0 ? contentIndex : eventText.length;
+  if (contentIndex < 0) return null;
+  const headerLength = contentIndex;
   const eventMatches = [...eventText.matchAll(new RegExp('^Event ID:\\s*(' + EVENT_ID + ')\\s*$', 'gmi'))];
   if (eventMatches.length !== 1 || eventMatches[0].index >= headerLength) return null;
   const header = eventText.slice(0, headerLength);
