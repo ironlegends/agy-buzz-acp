@@ -429,6 +429,23 @@ export async function inspectSteeringBridge({ bridgeDir, ownerId, channelId } = 
   return { exists: true, blocked: state.status === 'blocked' || state.guardBlocked };
 }
 
+// Archive a bridge whose durable state is blocked, so the next turn builds a fresh
+// one. The caller proves the block is orphaned: this process holds the session
+// ownership lock, and no turn of this adapter is running on the channel. The old
+// directory is renamed, never deleted, so the orphaned steer stays readable.
+export async function reconcileSteeringBridge({ bridgeDir, ownerId, channelId, nowFn = Date.now } = {}) {
+  const status = await inspectSteeringBridge({ bridgeDir, ownerId, channelId });
+  if (!status.exists || !status.blocked) return { reconciled: false, archivedTo: null };
+  const path = normalizeBridgePath(bridgeDir);
+  const stamp = new Date(nowFn()).toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z');
+  let target = `${path}-archived-${stamp}`;
+  for (let suffix = 1; await lstat(target).catch(() => null); suffix += 1) {
+    target = `${path}-archived-${stamp}-${suffix}`;
+  }
+  await rename(path, target);
+  return { reconciled: true, archivedTo: target };
+}
+
 export class SteeringCoordinator {
   constructor({ bridgeDir, binding, enabled, hookConfigured, injectorExclusive, conversationBound = true } = {}) {
     this.bridgeDir = bridgeDir;

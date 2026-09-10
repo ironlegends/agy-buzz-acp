@@ -59,19 +59,27 @@ async function durableHarness() {
   return { state, scope, turn, counters, dispose };
 }
 
-test('a record blocked by an incomplete turn still refuses the next turn of the same process', async () => {
+async function markForeignRecord(state) {
+  const blocked = JSON.parse(await readFile(state.path(channelId), 'utf8'));
+  blocked.scope = { ...blocked.scope, model: 'some-other-model' };
+  await writeFile(state.path(channelId), `${JSON.stringify(blocked)}\n`, { encoding: 'utf8', mode: 0o600 });
+}
+
+test('a record blocked with a foreign scope still refuses the next turn of the same process', async () => {
   const { state, scope, turn, counters, dispose } = await durableHarness();
   try {
     assert.equal((await turn()).result.stopReason, 'end_turn');
     assert.equal(counters.prompts, 1);
 
-    // Exactly what an idle-killed turn leaves behind: `invalidate` ran, `save` never did.
+    // A block reconciliation refuses to lift, so the refusal still proves that the
+    // record is read again on this turn instead of being remembered in the pool.
     await state.invalidate(scope);
+    await markForeignRecord(state);
 
     const refused = await turn();
     assert.ok(refused?.error, `expected refusal, got ${JSON.stringify(refused)}`);
-    assert.match(refused.error.message, /blocked after an incomplete turn/i);
-    assert.equal(counters.prompts, 1, 'the provider must not run on a blocked record');
+    assert.match(refused.error.message, /scope mismatch/i);
+    assert.equal(counters.prompts, 1, 'the provider must not run on a foreign record');
   } finally { await dispose(); }
 });
 
@@ -80,7 +88,8 @@ test('a repaired record is honoured without restarting the adapter', async () =>
   try {
     await turn();
     await state.invalidate(scope);
-    assert.match((await turn()).error.message, /blocked after an incomplete turn/i);
+    await markForeignRecord(state);
+    assert.match((await turn()).error.message, /scope mismatch/i);
 
     // The repair an operator applies on disk while the pool keeps running.
     await state.save(scope, 'conversation-1');
@@ -123,31 +132,33 @@ async function steeringHarness() {
     return wire.trim().split('\n').map((line) => JSON.parse(line)).find((message) => message.id === id);
   };
   const bridgeKey = createHash('sha256').update(`${owner}:${channelId}`).digest('hex');
-  const statePath = join(dir, `channel-${bridgeKey}`, 'state.json');
-  const setGuard = async (guardBlocked) => {
-    const current = JSON.parse(await readFile(statePath, 'utf8'));
-    await writeFile(statePath, `${JSON.stringify({ ...current, guardBlocked })}\n`, { encoding: 'utf8', mode: 0o600 });
+  const bindingPath = join(dir, `channel-${bridgeKey}`, 'binding.json');
+  const setBinding = async (patch) => {
+    const current = JSON.parse(await readFile(bindingPath, 'utf8'));
+    await writeFile(bindingPath, `${JSON.stringify({ ...current, ...patch })}\n`, { encoding: 'utf8', mode: 0o600 });
   };
   const dispose = async () => {
     await server.close();
     await rm(dir, { recursive: true, force: true });
   };
-  return { turn, counters, setGuard, dispose };
+  return { turn, counters, setBinding, dispose };
 }
 
 test('a repaired steering bridge is honoured without restarting the adapter', async () => {
-  const { turn, counters, setGuard, dispose } = await steeringHarness();
+  const { turn, counters, setBinding, dispose } = await steeringHarness();
   try {
     assert.equal((await turn()).result.stopReason, 'end_turn');
     assert.equal(counters.prompts, 1);
 
-    await setGuard(true);
+    // A binding an orphan block cannot explain: reconciliation refuses it, so the
+    // refusal still proves the bridge is read again on this turn.
+    await setBinding({ channelId: '123e4567-e89b-12d3-a456-426614174999' });
     const refused = await turn();
     assert.ok(refused?.error, `expected refusal, got ${JSON.stringify(refused)}`);
-    assert.match(refused.error.message, /steering is durably blocked/i);
-    assert.equal(counters.prompts, 1, 'the provider must not run on a blocked bridge');
+    assert.match(refused.error.message, /binding mismatch/i);
+    assert.equal(counters.prompts, 1, 'the provider must not run on a foreign bridge');
 
-    await setGuard(false);
+    await setBinding({ channelId });
     const resumed = await turn();
     assert.ok(resumed?.result, `expected the repaired bridge to be honoured, got ${JSON.stringify(resumed)}`);
     assert.equal(counters.prompts, 2, 'the provider must run again once the bridge is sound');
