@@ -139,13 +139,20 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
   // outbox record still `inflight` or `uncertain` means an external effect happened
   // whose outcome nobody has settled. That block is not orphaned, it is waiting for
   // an operator, and reconciliation must leave it exactly where it is.
-  const channelHasUnsettledDelivery = async (channelId) => {
-    if (!outbox?.enabled || typeof outbox.list !== 'function') return false;
+  //
+  // A disabled or unreadable outbox cannot answer that question at all, and an
+  // unanswered question refuses. Answering `no unsettled delivery` there left the
+  // only durable condition inert in the default configuration, where the outbox
+  // is off, and every test of reconciliation ran in exactly that configuration.
+  const unsettledDeliveryRefusal = async (channelId) => {
+    if (!outbox?.enabled || typeof outbox.list !== 'function') return 'delivery outbox is disabled';
     let records;
     try { records = await outbox.list(); }
-    catch { return true; }
+    catch { return 'delivery outbox is unreadable'; }
     return records.some((record) => record?.channelId === channelId &&
-      (record.status === 'uncertain' || record.status === 'inflight'));
+      (record.status === 'uncertain' || record.status === 'inflight'))
+      ? 'an unsettled delivery is waiting'
+      : null;
   };
 
   // In-process half of the reconciliation guard. The other half is the session
@@ -157,6 +164,27 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
       if (sessions.get(activeSessionId)?.channelId === channelId) return true;
     }
     return false;
+  };
+
+  // Names the condition that refuses reconciliation, or null when all of them hold.
+  // A refusal has to say which door closed: a bare terminal block gives an operator
+  // no way to tell a guard doing its job from a fault.
+  const reconciliationRefusal = async (channelId, sessionId) => {
+    if (channelsBlockedHere.has(channelId)) return 'this process wrote the block';
+    if (channelBusyElsewhere(channelId, sessionId)) return 'another turn holds the channel';
+    return unsettledDeliveryRefusal(channelId);
+  };
+
+  // Steering runs before the durable state is scoped, so the channel ownership lock
+  // that `load` and `invalidate` take is not held yet when a bridge is inspected.
+  // Without it a second adapter on the same channel could archive a bridge that
+  // still belongs to a live turn, so a bridge is reconciled only where this instance
+  // can take that lock. Acquiring it here is idempotent: the turn takes it anyway.
+  const steeringReconciliationRefusal = async (channelId, sessionId) => {
+    if (!sessionState?.enabled) return 'durable session state is disabled';
+    try { await sessionState.ensureOwnership(channelId); }
+    catch { return 'the channel ownership lock is held elsewhere'; }
+    return reconciliationRefusal(channelId, sessionId);
   };
 
   async function inspectExistingSteering(entry, channelId, sessionId) {
@@ -172,8 +200,9 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
     // the verdict onto the pool entry would keep masking a repaired bridge for the
     // whole life of this process, long after the durable state became sound again.
     if (!status.blocked) return;
-    if (channelsBlockedHere.has(channelId) || channelBusyElsewhere(channelId, sessionId) ||
-        await channelHasUnsettledDelivery(channelId)) {
+    const refusal = await steeringReconciliationRefusal(channelId, sessionId);
+    if (refusal) {
+      report(`steering reconciliation refused channel=${channelId} reason=${refusal}`);
       throw steeringRpcError('agy steering is durably blocked');
     }
     const { archivedTo } = await reconcileSteeringBridge({
@@ -386,10 +415,12 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
               // A record left blocked by a turn that never reached `save` is repaired
               // here instead of waiting for an operator. The guard stays closed while
               // another turn of this adapter is running on the channel.
-              if (error?.code !== 'AGY_SESSION_STATE_BLOCKED' ||
-                  channelsBlockedHere.has(buzzContext.channelId) ||
-                  channelBusyElsewhere(buzzContext.channelId, params.sessionId) ||
-                  await channelHasUnsettledDelivery(buzzContext.channelId)) throw error;
+              if (error?.code !== 'AGY_SESSION_STATE_BLOCKED') throw error;
+              const refusal = await reconciliationRefusal(buzzContext.channelId, params.sessionId);
+              if (refusal) {
+                report(`session record reconciliation refused channel=${buzzContext.channelId} reason=${refusal}`);
+                throw error;
+              }
               const outcome = await sessionState.reconcile(stateScope);
               if (!outcome.reconciled) throw error;
               report(`session record reconciled channel=${buzzContext.channelId} conversation=${outcome.conversationId ?? 'none'}`);
