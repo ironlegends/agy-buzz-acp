@@ -129,7 +129,7 @@ If an enabled outbox cannot write, the active adapter can retain a `mem_*` recov
 - `initialize` accepts ACP protocolVersion 1 or 2 and negotiates stable v1 semantics.
 - `session/new` requires an absolute working directory, creates an isolated session and advertises discovered model options when available.
 - `session/set_config_option` accepts the model choice only before the first prompt, using an ID offered by that session.
-- `session/prompt` accepts text blocks with a valid Buzz transport envelope. Both historical bracket markers and current XML markers are supported. The current Context block alone supplies the destination; duplicates and contradictory destinations are rejected before calling the provider.
+- `session/prompt` accepts text blocks with a valid Buzz transport envelope. Both historical bracket markers and current XML markers are supported. The current Context block alone supplies the destination; duplicates and contradictory destinations are rejected before calling the provider. A top-level channel prompt whose Context block names no destination falls back to the triggering event: a single `<buzz-event>` block, one `Event ID:` line above its `Content:` line, and a `Channel:` line equal to the Context channel. Any ambiguity refuses the prompt instead of guessing.
 - `session/cancel` interrupts provider/publication work without replaying the prompt.
 - Images, audio, embedded context and bridging `mcpServers` are not supported. Provider-local tools remain governed by the provider's own configuration.
 
