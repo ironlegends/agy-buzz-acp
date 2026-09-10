@@ -170,13 +170,26 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
   // A refusal has to say which door closed: a bare terminal block gives an operator
   // no way to tell a guard doing its job from a fault.
   //
-  // `channelBusyElsewhere` is defence in depth and is no longer falsifiable. A live
-  // turn on the channel has already run `invalidate`, so it also sits in
-  // `channelsBlockedHere` until its `save`, and `save` is followed immediately by
-  // the removal with no injectable wait in between. It used to be falsifiable on
-  // the steering path only because that harness ran without durable state, where
+  // `channelBusyElsewhere` is defence in depth and is not falsifiable by the current
+  // suite. A live turn on the channel has already run `invalidate`, so it also sits in
+  // `channelsBlockedHere` until its `save`, and `save` is followed immediately by the
+  // removal with no injectable wait in between. It used to look falsifiable on the
+  // steering path only because that harness ran without durable state, where
   // `channelsBlockedHere` is never filled — the same illusion the disabled outbox
-  // produced. It is kept because it costs nothing, not because it is proven.
+  // produced.
+  //
+  // It is kept because one race leaves it as the only guard. That race is reachable in
+  // principle and is not exercised here. The steering hook runs in the provider child,
+  // out of this process, and can move a bridge to `blocked` at any moment
+  // (`claimPendingSteer` calls `blockState`, src/steering.js:347 and :326). Meanwhile
+  // `inspectExistingSteering` runs before `activeTurns.set` and before the
+  // `agy channel session is already owned` refusal, and the ownership lock is held per
+  // process, not per session: `ownedChannels.has` short-circuits every later caller
+  // (src/session-state.js:90). So a second session of this adapter, prompting the same
+  // channel between the first turn's `scope` and its `channelsBlockedHere.add`, passes
+  // the ownership check and finds the channel absent from `channelsBlockedHere`. Only
+  // this condition then stops it from archiving a bridge that is still live. The
+  // ordering above is measured; the race itself is not. Found by Sonnet's delta review.
   const reconciliationRefusal = async (channelId, sessionId) => {
     if (channelsBlockedHere.has(channelId)) return 'this process wrote the block';
     if (channelBusyElsewhere(channelId, sessionId)) return 'another turn holds the channel';
@@ -412,6 +425,11 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
             if (existingSessionId && existingSessionId !== params.sessionId) {
               throw Object.assign(new Error('agy channel session is already owned'), { rpcCode: -32002, rpcMessage: 'agy channel session is already owned' });
             }
+            // Maintenance constraint: `channelSessions` is never purged on success. The
+            // entry is removed only on the failure path of this turn, so a channel stays
+            // pinned to its first successful session for the life of the process. That is
+            // the intent — a second session must be refused above, not silently take the
+            // channel over — but it also means a session that ends cleanly keeps the pin.
             channelSessions.set(buzzContext.channelId, params.sessionId);
             // Every turn re-reads the record: `load` is the guard that refuses a block
             // left by an incomplete turn. Binding the trusted conversation stays a
@@ -535,6 +553,11 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
                 }
                 if (controller.signal.aborted) throw new Error('checkpoint cancelled');
                 await sessionState.save(stateScope, conversationId);
+                // Maintenance constraint: this removal stays immediately after the save,
+                // with no await in between. `reconciliationRefusal` reads
+                // `channelsBlockedHere` as the in-process proof that a live turn owns the
+                // channel. A gap between the two would show the channel as free while the
+                // record on disk is already settled, or the reverse if the order flipped.
                 channelsBlockedHere.delete(buzzContext.channelId);
                 turnSafe = true;
               } else {
