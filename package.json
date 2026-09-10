@@ -1,6 +1,6 @@
 {
   "name": "agy-buzz-acp",
-  "version": "0.5.4",
+  "version": "0.5.5",
   "description": "Minimal ACP stdio adapter for the official Antigravity CLI.",
   "type": "module",
   "bin": {
