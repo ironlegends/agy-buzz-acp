@@ -169,6 +169,14 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
   // Names the condition that refuses reconciliation, or null when all of them hold.
   // A refusal has to say which door closed: a bare terminal block gives an operator
   // no way to tell a guard doing its job from a fault.
+  //
+  // `channelBusyElsewhere` is defence in depth and is no longer falsifiable. A live
+  // turn on the channel has already run `invalidate`, so it also sits in
+  // `channelsBlockedHere` until its `save`, and `save` is followed immediately by
+  // the removal with no injectable wait in between. It used to be falsifiable on
+  // the steering path only because that harness ran without durable state, where
+  // `channelsBlockedHere` is never filled — the same illusion the disabled outbox
+  // produced. It is kept because it costs nothing, not because it is proven.
   const reconciliationRefusal = async (channelId, sessionId) => {
     if (channelsBlockedHere.has(channelId)) return 'this process wrote the block';
     if (channelBusyElsewhere(channelId, sessionId)) return 'another turn holds the channel';
