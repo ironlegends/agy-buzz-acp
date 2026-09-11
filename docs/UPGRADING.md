@@ -12,7 +12,7 @@ created: 2026-09-07
 The command is a dry run by default. Obtain the expected SHA-256 from the trusted release publication or its separately authenticated checksum, then inspect the plan:
 
 ```text
-agy-buzz-manage install --archive agy-buzz-acp-0.5.3.tgz --sha256 <sha256> --root C:\agy\agy-buzz-acp --harness C:\Users\me\harness.json
+agy-buzz-manage install --archive agy-buzz-acp-0.5.8-rc.1.tgz --sha256 <sha256> --root C:\agy\agy-buzz-acp --harness C:\Users\me\harness.json
 ```
 
 The archive must be a gzip compressed tar file with the npm `package/` layout. The manager checks the digest before parsing, requires package name `agy-buzz-acp`, a valid semantic version, the package file allowlist, and the adapter entrypoint. Absolute paths, traversal paths, duplicate entries, symlinks, hardlinks, and unsupported tar entry types are rejected. Validation parses `package.json` as data and does not import or execute archive files.
@@ -20,7 +20,7 @@ The archive must be a gzip compressed tar file with the npm `package/` layout. T
 Apply the displayed plan only after reviewing it:
 
 ```text
-agy-buzz-manage install --archive agy-buzz-acp-0.5.3.tgz --sha256 <sha256> --root C:\agy\agy-buzz-acp --harness C:\Users\me\harness.json --apply
+agy-buzz-manage install --archive agy-buzz-acp-0.5.8-rc.1.tgz --sha256 <sha256> --root C:\agy\agy-buzz-acp --harness C:\Users\me\harness.json --apply
 ```
 
 The release is extracted into `root\versions\agy-buzz-acp-<version>`. The original harness bytes are preserved at the unique `harness.json.<timestamp>-<id>.backup` path shown in the result, with a matching `.receipt.json` association record. Its `id`, `label`, `command`, and `env` remain unchanged, and only the adapter entrypoint in `args[0]` is changed. Existing backup and receipt paths are never overwritten. If the harness changed after planning, the operation stops before writing.

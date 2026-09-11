@@ -26,7 +26,7 @@ npm pack
 Install the generated archive, or an archive from a reviewed release:
 
 ```sh
-npm install --global ./agy-buzz-acp-0.5.3.tgz
+npm install --global ./agy-buzz-acp-0.5.8-rc.1.tgz
 ```
 
 The package provides `agy-buzz-acp`, `agy-buzz-recover`, `agy-buzz-doctor`, `agy-buzz-manage`, and `agy-buzz-steer-hook`. The native file-lock dependency and its bundled support packages are included in the release archive. No npm-registry publication is required to install the archive.
