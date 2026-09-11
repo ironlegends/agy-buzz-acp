@@ -68,11 +68,11 @@ test('the active reservation remains held until unused ownership release settles
   }finally{finish();await server.close();await state.release();await rm(dir,{recursive:true,force:true});}
 });
 
-test('preflight retains ownership once a cached conversation has been bound',async()=>{
+for(const cached of [false,true]) test(`preflight preserves cached binding without retaining an empty unused lease (${cached})`,async()=>{
   const dir=await mkdtemp(join(tmpdir(),'agy-bound-preflight-'));
   const state=new SessionState({dir,owner,relay}),peer=new SessionState({dir,owner,relay});
   const scope=await state.scope({channelId:channel,cwd:dir,model:'gemini-3.8-flash-high'});
-  await state.save(scope,'cached-conversation');await state.release();
+  if(cached) await state.save(scope,'cached-conversation');await state.release();
   let bound=false,calls=0;
   const server=createAcpServer({input:new PassThrough(),output:new PassThrough(),diagnostics:new PassThrough(),...isolatedServerOptions({
     sessionStateFactory:()=>state,identityFactory:async()=>owner,outboxFactory:()=>({enabled:false,configurationError:'synthetic invalid outbox'}),
@@ -81,7 +81,12 @@ test('preflight retains ownership once a cached conversation has been bound',asy
   try{
     await rpc(1,'initialize',{protocolVersion:1});await rpc(2,'session/new',{cwd:dir});
     await rpc(3,'session/prompt',{sessionId:[...server.sessions.keys()][0],prompt:[{type:'text',text:`<context>\nChannel: test (#${channel})\nThread root: ${'f'.repeat(64)}\n</context>`},{type:'text',text:'synthetic'}]});
-    assert.equal(bound,true);assert.equal(calls,0);
-    await assert.rejects(peer.ensureOwnership(channel),e=>e.code==='AGY_SESSION_STATE_BUSY');
+    assert.equal(bound,cached);assert.equal(calls,0);
+    if(cached) await assert.rejects(peer.ensureOwnership(channel),e=>e.code==='AGY_SESSION_STATE_BUSY');
+    else {
+      assert.equal(await peer.ensureOwnership(channel),true);
+      const entry=[...server.sessions.values()][0];
+      assert.equal(entry.bound,false);assert.equal(entry.steering,null);
+    }
   }finally{await server.close();await state.release();await peer.release();await rm(dir,{recursive:true,force:true});}
 });

@@ -337,7 +337,7 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
         session.setModelCatalog?.(catalog);
         sessions.set(sessionId, { session, sessionId, cwd: params.cwd,
           model: requestedModel, modelCatalog: catalog, bound: false, stateError: null,
-          steering: null, systemPrompt, needsReplacement: false });
+          steering: null, systemPrompt, needsReplacement: false, cachedConversationBound: false });
         if (id !== undefined) write(rpcResult(id, { sessionId, configOptions: modelConfigOptions(catalog, requestedModel) }));
         return;
       }
@@ -450,13 +450,17 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
               replacement.setModelCatalog?.(entry.modelCatalog);
               entry.session = session = replacement;
               entry.bound = false;
+              entry.cachedConversationBound = false;
               entry.steering = null;
               entry.needsReplacement = false;
               report(`provider session rebuilt channel=${buzzContext.channelId}; interrupted work is not replayed by the adapter`);
               emitDeliveryDiagnostic(params.sessionId, 'Previous turn interrupted; provider session rebuilt. Prior correction consumption and external effects may remain uncertain.');
             }
             if (!entry.bound) {
-              if (saved) session.setTrustedConversation?.(saved.conversationId);
+              if (saved) {
+                session.setTrustedConversation?.(saved.conversationId);
+                entry.cachedConversationBound = true;
+              }
               entry.bound = true;
             }
             await sessionState.invalidate(stateScope);
@@ -474,9 +478,16 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
           // active reservation and pin until release completes, so another prompt
           // cannot race ownership cleanup. Cached conversation bindings and previous
           // providers/leases remain pinned, so a peer cannot change their association.
-          if (!ownershipPreviouslyHeld && !entry.bound && !entry.providerEverStarted && !entry.needsReplacement &&
+          if (!ownershipPreviouslyHeld && !entry.cachedConversationBound && !entry.providerEverStarted && !entry.needsReplacement &&
               sessionState?.ownsChannel?.(buzzContext.channelId)) {
-            try { await sessionState.releaseOwnership(buzzContext.channelId); }
+            try {
+              await sessionState.releaseOwnership(buzzContext.channelId);
+              // A peer may now establish an association: discard empty cached
+              // preflight state so the next attempt binds the new disk record.
+              entry.bound = false;
+              entry.steering = null;
+              session.setSteeringCoordinator?.(null);
+            }
             catch {
               entry.stateError = 'agy channel ownership release could not be confirmed';
               report('unused channel ownership release could not be confirmed');
