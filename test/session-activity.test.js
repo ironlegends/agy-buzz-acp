@@ -226,7 +226,7 @@ test('resumes only after a successful turn, then rejects a repeated init', async
   emit(children[1], { event: 'init', conversation_id: 'resume-123' });
   await repeatedInit;
   assert.equal(children[1].stdin.writes.length, 1);
-  assert.match(children[1].stdin.writes[0], /"second"/);
+  assert.match(children[1].stdin.writes[0], /second"/);
   assert.notEqual(activity[0].toolCallId, activity[2].toolCallId);
 });
 

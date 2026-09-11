@@ -172,7 +172,9 @@ test('passes the private bridge to the child and publishes only the final correc
   const turn = session.prompt('base', () => {});
   assert.equal(providerOptions.env.AGY_STEER_BRIDGE_DIR, coordinator.bridgeDir);
   assert.equal(providerOptions.env.AGY_STEER_BINDING, 'token');
-  assert.deepEqual(child.stdin.writes[0], { event: 'user', message: { content: 'base' } });
+  assert.equal(child.stdin.writes[0].event, 'user');
+  assert.ok(child.stdin.writes[0].message.content.endsWith('\nbase'));
+  assert.match(child.stdin.writes[0].message.content, /The wrapper publishes/);
   emit(child, { event: 'init', conversation_id: conversationId });
   emitUserInput(child, 2);
   emit(child, { event: 'step_update', step_update: {

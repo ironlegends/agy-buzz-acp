@@ -26,7 +26,7 @@ npm pack
 Install the generated archive, or an archive from a reviewed release:
 
 ```sh
-npm install --global ./agy-buzz-acp-0.5.3.tgz
+npm install --global ./agy-buzz-acp-0.5.8.tgz
 ```
 
 The package provides `agy-buzz-acp`, `agy-buzz-recover`, `agy-buzz-doctor`, `agy-buzz-manage`, and `agy-buzz-steer-hook`. The native file-lock dependency and its bundled support packages are included in the release archive. No npm-registry publication is required to install the archive.
@@ -81,6 +81,8 @@ Persisted conversations retain their model scope. Selecting a different model ca
 If catalog discovery fails, the configured model remains usable and no model list is invented. Check the official CLI's installation and authentication separately. ACP `initialize`, CLI help/version, setup and offline doctor do not query the model catalog.
 ## Activity and delivery
 
+The bridge publication directive is sent on the first prompt of each provider process, including resumed conversations. Other authorized Buzz operations remain available; the provider must leave publication of this reply to the adapter. Empty, whitespace-only or non-string answers are rejected before outbox preparation or publication. This adopts the publication fixes proposed by Xeoneid in PR #9, with resume coverage.
+
 Activity Log distinguishes provider generation, available tool activity, and Buzz delivery. Activities carry unique IDs and available durations. Parameters, raw tool results, provider errors and hidden reasoning are not forwarded.
 
 The provider protocol examined does not expose a textual reasoning summary. No synthetic `agent_thought_chunk` is generated. The final provider response is published separately from activity events.
@@ -104,7 +106,7 @@ Associations are scoped to the verified public Buzz identity, relay, canonical w
 
 Corrupted state and mismatched scope block automatic recovery. A native lock file may remain after release; its presence is not evidence of an active owner. The adapter does not automatically remove lock files, replay interrupted work or reconcile uncertain relay publication. The recovery CLI described below is for retained answers, not for overriding conversation locks.
 
-A record left blocked by an interrupted turn is reconciled on the next prompt, but only where nobody is left to answer for the block. Four conditions must hold: the adapter holds the channel ownership lock, which no second adapter can take; no turn of its own is running on that channel; this process did not write the block itself; and no `inflight` or `uncertain` delivery for that channel remains in the outbox. A block written by a turn of this process stays terminal and requires an operator, who can repair it on disk without restarting the adapter. The conversation is resumed when the record still names one, and the record is removed when the turn died before any conversation existed. A blocked steering bridge is renamed to a sibling `-archived-<timestamp>` directory and rebuilt. Reconciliation therefore requires both a private session directory and a delivery outbox: without the outbox the fourth condition cannot be evaluated, and a condition that cannot be evaluated refuses. Every reconciliation and every refusal writes a diagnostic line naming the condition that closed the door. Reconciliation lifts a block; it never replays interrupted work and never turns an uncertain publication into a delivered one.
+A record left blocked by an interrupted turn is reconciled on the next prompt only after the turn that wrote it has fully settled. Three durable/liveness conditions must hold: the adapter holds the channel ownership lock, which no second adapter can take; no turn is still running on that channel; and no `inflight` or `uncertain` delivery for that channel remains in the outbox. The 0.5.8 candidate additionally requires a bounded, confirmed provider close before reconciling a failed turn in the same process. It constructs a new provider-session object and binds only the validated stored conversation, without clearing context-loss flags on the failed object. Unknown retirement refuses without archiving the bridge. The conversation is resumed when the record still names one, and the record is removed when the turn died before any conversation existed. A blocked steering bridge is renamed to a sibling `-archived-<timestamp>` directory and rebuilt. Reconciliation therefore requires both a private session directory and a delivery outbox: without the outbox the delivery condition cannot be evaluated, and a condition that cannot be evaluated refuses. Every reconciliation and every refusal writes a diagnostic line naming the condition that closed the door. Reconciliation lifts a block; it never internally resubmits the interrupted prompt or archived correction and never turns an uncertain publication into a delivered one. The next submitted prompt is separate: Buzz may itself requeue prior events, so this is not an exactly-once guarantee for external tools. Archived corrections remain of uncertain consumption, not proven undelivered.
 
 To deliberately start a new conversation instead, configure a new empty private session directory and preserve the old directory as evidence. This is an operator decision that discards continuity; it is not automatic recovery or prompt replay.
 

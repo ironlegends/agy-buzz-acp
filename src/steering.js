@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { execFile as execFileCallback } from 'node:child_process';
 import { chmod, lstat, mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { promisify } from 'node:util';
+import { setTimeout as pause } from 'node:timers/promises';
 import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, parse, resolve } from 'node:path';
 import { acquireNativeLock } from './native-lock.js';
@@ -12,6 +13,7 @@ let windowsOwnerSidPromise;
 export const STEERING_SCHEMA_VERSION = 1;
 export const MAX_STEERING_TEXT_LENGTH = 16_384;
 export const MAX_PENDING_STEERS = 8;
+export const STEERING_LOCK_WAIT_MS = 2_000;
 
 const OWNER_RE = /^[0-9a-f]{64}$/i;
 const CHANNEL_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -203,6 +205,22 @@ async function assertRegularFile(path) {
   }
 }
 
+async function replaceSteeringFile(source, destination) {
+  const deadline = performance.now() + 500;
+  let replaced = false;
+  do {
+    try { await rename(source, destination); replaced = true; }
+    catch (error) {
+      // Windows may transiently deny replacement while another reader closes.
+      // Retry only the failed atomic rename, never the enclosing state transition.
+      const remaining = deadline - performance.now();
+      if (process.platform !== 'win32' ||
+          !['EPERM', 'EACCES', 'EBUSY'].includes(error?.code) || remaining <= 0) throw error;
+      await pause(Math.min(20, remaining));
+    }
+  } while (!replaced);
+}
+
 async function writeJsonAtomic(path, value) {
   const parent = dirname(path);
   await ensurePrivateDirectory(parent);
@@ -217,7 +235,7 @@ async function writeJsonAtomic(path, value) {
   const temporary = join(parent, `.${parse(path).name}.${randomUUID()}.tmp`);
   try {
     await writeFile(temporary, `${JSON.stringify(value)}\n`, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
-    await rename(temporary, path);
+    await replaceSteeringFile(temporary, path);
     await chmod(path, 0o600);
   } catch (error) {
     await rm(temporary, { force: true }).catch(() => {});
@@ -310,9 +328,20 @@ function validateAck(ack, binding, entry) {
   return ack;
 }
 
-async function withBridgeLock(bridgeDir, callback) {
+async function withBridgeLock(bridgeDir, callback, { waitMs = STEERING_LOCK_WAIT_MS } = {}) {
   await ensurePrivateDirectory(bridgeDir);
-  const lock = await acquireNativeLock(join(bridgeDir, '.steering.lock'));
+  const deadline = performance.now() + waitMs;
+  let lock;
+  // Only a pre-mutation lock collision may be retried. Ownership, ACL, scope,
+  // corrupt state and errors from the protected callback remain fail-closed.
+  do {
+    try { lock = await acquireNativeLock(join(bridgeDir, '.steering.lock')); }
+    catch (error) {
+      const remaining = deadline - performance.now();
+      if (error?.code !== 'AGY_NATIVE_LOCK_BUSY' || remaining <= 0) throw error;
+      await pause(Math.min(20, remaining));
+    }
+  } while (!lock);
   try { return await callback(); }
   finally { await lock.release(); }
 }
@@ -653,7 +682,7 @@ export class SteeringCoordinator {
       await blockState(this.bridgeDir, state, reason);
       this.blocked = true;
       return true;
-    });
+    }, { waitMs: 0 });
   }
 }
 

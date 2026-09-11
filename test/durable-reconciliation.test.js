@@ -57,7 +57,7 @@ async function durableHarness({ outboxFactory } = {}) {
       setTrustedConversation(value) { trusted.push(value); },
       getConversationId: () => 'conversation-1',
       hasConfirmedConversation: () => true,
-      retireForCheckpoint: async () => 'conversation-1',
+      retireForCheckpoint: async () => 'conversation-1', retireForRecovery: async () => true,
       cancel() {}, close() {}
     }),
     publisherFactory: () => ({ publish: async () => ({ status: 'sent', eventId: 'cd'.repeat(32) }) })
@@ -146,6 +146,7 @@ async function steeringHarness({ durableState = true } = {}) {
   const readDiagnostics = diagnosticReader(diagnostics);
   const counters = { prompts: 0 };
   const gates = [];
+  const errors = [];
   const server = createAcpServer({
     input: new PassThrough(), output, diagnostics,
     ...isolatedServerOptions({
@@ -154,12 +155,14 @@ async function steeringHarness({ durableState = true } = {}) {
           counters.prompts += 1;
           const gate = gates.shift();
           if (gate) await gate;
+          const error = errors.shift();
+          if (error) throw error;
           return 'answer';
         },
         setSteeringCoordinator() {}, getConversationId: () => 'conversation-1',
         hasConfirmedConversation: () => true,
         setTrustedConversation() {},
-        retireForCheckpoint: async () => 'conversation-1',
+        retireForCheckpoint: async () => 'conversation-1', retireForRecovery: async () => true,
         cancel() {}, close() {}
       }),
       sessionStateFactory: () => (durableState ? state : null),
@@ -200,7 +203,7 @@ async function steeringHarness({ durableState = true } = {}) {
     await rm(outbox.dir, { recursive: true, force: true });
     await rm(dir, { recursive: true, force: true });
   };
-  return { state, outbox, cwd: dir, turn, promptOn, newSession, counters, gates, setGuard, archives, bridgeDir, sessionId, readDiagnostics, dispose };
+  return { state, outbox, cwd: dir, turn, promptOn, newSession, counters, gates, errors, setGuard, archives, bridgeDir, sessionId, readDiagnostics, dispose };
 }
 
 test('a bridge left blocked by a dead turn is archived and rebuilt on the next prompt', async () => {
@@ -220,6 +223,55 @@ test('a bridge left blocked by a dead turn is archived and rebuilt on the next p
     assert.equal(JSON.parse(await readFile(join(bridgeDir, 'state.json'), 'utf8')).guardBlocked, false);
     assert.match(readDiagnostics(), /steering bridge reconciled channel=[0-9a-f-]+ archived=/);
   } finally { await dispose(); }
+});
+
+test('server rebuilds an explicitly retired mock session (real watchdog covered separately)', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'agy-reconcile-steer-timeout-'));
+  const state = new SessionState({ dir: await mkdtemp(join(tmpdir(), 'agy-steer-timeout-state-')), owner, relay });
+  const outbox = new DeliveryOutbox({ dir: await mkdtemp(join(tmpdir(), 'agy-steer-timeout-outbox-')), owner });
+  const output = new PassThrough();
+  const diagnostics = new PassThrough();
+  const find = wireReader(output);
+  const readDiagnostics = diagnosticReader(diagnostics);
+  let prompts = 0;
+  let steering = null;
+  const server = createAcpServer({
+    input: new PassThrough(), output, diagnostics,
+    ...isolatedServerOptions({
+      sessionFactory: () => ({
+        async prompt() {
+          prompts += 1;
+          if (prompts === 1) {
+            await steering.block('agy steering claim timed out');
+            throw Object.assign(new Error('agy steering claim timed out'), { code: 'AGY_STEER_UNCERTAIN' });
+          }
+          return 'answer';
+        },
+        setSteeringCoordinator(value) { steering = value; },
+        getConversationId: () => 'conversation-1', hasConfirmedConversation: () => true,
+        setTrustedConversation() {}, retireForCheckpoint: async () => 'conversation-1', retireForRecovery: async () => true, cancel() {}, close() {}
+      }),
+      sessionStateFactory: () => state, outboxFactory: () => outbox, identityFactory: async () => owner
+    }),
+    steeringSupported: true,
+    steeringConfig: { hookConfigured: true, injectorExclusive: true, ownerId: owner, rootDir: dir }
+  });
+  try {
+    await server.handle({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: 1 } });
+    await server.handle({ jsonrpc: '2.0', id: 2, method: 'session/new', params: { cwd: dir } });
+    const sessionId = [...server.sessions.keys()][0];
+    await server.handle({ jsonrpc: '2.0', id: 3, method: 'session/prompt', params: { sessionId, prompt } });
+    assert.ok(find(3).error, 'the steering timeout must fail the first turn');
+    await server.handle({ jsonrpc: '2.0', id: 4, method: 'session/prompt', params: { sessionId, prompt } });
+    assert.equal(find(4).result.stopReason, 'end_turn');
+    assert.equal(prompts, 2);
+    assert.match(readDiagnostics(), /steering bridge reconciled channel=[0-9a-f-]+ archived=/);
+    assert.match(readDiagnostics(), /session record reconciled channel=[0-9a-f-]+ conversation=none/);
+  } finally {
+    await server.close(); await state.release();
+    await rm(state.dir, { recursive: true, force: true }); await rm(outbox.dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test('a blocked bridge is not reconciled while another turn of this adapter holds the channel', async () => {
@@ -243,12 +295,35 @@ test('a blocked bridge is not reconciled while another turn of this adapter hold
     await second.settled;
     const refused = second.read();
     assert.ok(refused?.error, `expected refusal, got ${JSON.stringify(refused)}`);
-    assert.match(refused.error.message, /steering is durably blocked/i);
+    assert.match(refused.error.message, /channel turn is busy/i);
     assert.deepEqual(await archives(), [], 'a bridge held by a live turn must not be archived');
 
     release();
     await held.settled;
     assert.ok(held.read()?.result, 'the held turn must still complete');
+  } finally { await dispose(); }
+});
+
+test('a steering failure from this process recovers on the next prompt without respawn', async () => {
+  const { turn, promptOn, counters, gates, errors, setGuard, archives, bridgeDir, sessionId, dispose } = await steeringHarness();
+  try {
+    assert.ok((await turn())?.result);
+    let release;
+    gates.push(new Promise((resolve) => { release = resolve; }));
+    errors.push(Object.assign(new Error('agy steering claim timed out'), { code: 'AGY_STEER_UNCERTAIN' }));
+    const failed = promptOn(sessionId);
+    while (counters.prompts < 2) await new Promise((resolve) => setImmediate(resolve));
+    await setGuard(true);
+    release();
+    await failed.settled;
+    assert.ok(failed.read()?.error, 'the failed steering turn must surface an application error');
+    assert.deepEqual(await archives(), [], 'reconciliation waits for the next prompt');
+
+    const resumed = await turn();
+    assert.ok(resumed?.result, `expected recovery without respawn, got ${JSON.stringify(resumed)}`);
+    assert.equal(counters.prompts, 3);
+    assert.equal((await archives()).length, 1);
+    assert.equal(JSON.parse(await readFile(join(bridgeDir, 'state.json'), 'utf8')).guardBlocked, false);
   } finally { await dispose(); }
 });
 
@@ -274,8 +349,8 @@ test('reconcile refuses to repair a record written for another scope', async () 
   }
 });
 
-test('a block this process created stays terminal and is repaired without a restart', async () => {
-  const { state, turn, counters, record, dispose } = await durableHarness();
+test('a block from a settled turn is reconciled by the same process on the next prompt', async () => {
+  const { state, turn, counters, record, readDiagnostics, dispose } = await durableHarness();
   try {
     const realSave = state.save.bind(state);
     let failures = 0;
@@ -289,20 +364,14 @@ test('a block this process created stays terminal and is repaired without a rest
     assert.equal(failures, 1, 'the save failure must have been exercised');
     assert.equal((await record()).status, 'blocked', 'a failed save leaves the record blocked');
 
-    // This adapter wrote that block, so reconciliation must not lift it: the turn
-    // behind it started the provider and its external effects are not settled.
-    const refused = await turn();
-    assert.ok(refused?.error, `expected refusal, got ${JSON.stringify(refused)}`);
-    assert.match(refused.error.message, /blocked after an incomplete turn/i);
-    assert.equal(counters.prompts, 1, 'the provider must not run again on a block from this process');
-
-    // The refusal must come from the record, not from a marker kept in pool memory:
-    // an operator repair on disk is honoured by the next prompt (lot 1, site C).
-    const scope = await state.scope({ channelId, cwd: state.dir, model: 'gemini-3.8-flash-high' });
-    await realSave(scope, 'conversation-1');
+    // The first turn is now fully settled. The same process must behave like a fresh
+    // process: re-read the durable record, apply the outbox/ownership guards, and
+    // reconcile it instead of keeping a process-lifetime refusal in memory.
     const resumed = await turn();
-    assert.ok(resumed?.result, `expected the repaired record to be honoured, got ${JSON.stringify(resumed)}`);
+    assert.ok(resumed?.result, `expected same-process reconciliation, got ${JSON.stringify(resumed)}`);
     assert.equal(counters.prompts, 2);
+    assert.equal((await record()).status, 'ready');
+    assert.match(readDiagnostics(), /session record reconciled channel=[0-9a-f-]+ conversation=none/);
   } finally { await dispose(); }
 });
 
@@ -422,14 +491,14 @@ test('a bridge is not archived when the channel ownership lock cannot be taken',
   } finally { await dispose(); }
 });
 
-test('a bridge blocked by a turn of this process is not archived', async () => {
-  // Reserve 1 of the previous review: mutating `channelsBlockedHere.has` on the
+test('a bridge blocked by a settled turn of this process is reconciled on the next prompt', async () => {
+  // Reserve 1 of the previous review: mutating `channelsWithLiveBlock.has` on the
   // steering path left the battery green, because the turn fails either way. Only
   // the bridge directory itself can disagree, so assert on the archive.
   const { state, turn, counters, setGuard, archives, bridgeDir, readDiagnostics, dispose } = await steeringHarness();
   try {
-    // A turn that answered and then failed to save leaves the channel marked here:
-    // this process owns that block, so the bridge under it is not orphaned either.
+    // A turn that answered and then failed to save leaves durable state blocked.
+    // Once that turn has settled, the next prompt may reconcile it in this process.
     const realSave = state.save.bind(state);
     let failures = 0;
     state.save = async (...args) => {
@@ -440,11 +509,11 @@ test('a bridge blocked by a turn of this process is not archived', async () => {
     assert.equal(failures, 1, 'the save failure must have been exercised');
     await setGuard(true);
 
-    const refused = await turn();
-    assert.ok(refused?.error, `expected refusal, got ${JSON.stringify(refused)}`);
-    assert.equal(counters.prompts, 1);
-    assert.deepEqual(await archives(), [], 'a bridge blocked by this process must not be archived');
-    assert.equal(JSON.parse(await readFile(join(bridgeDir, 'state.json'), 'utf8')).guardBlocked, true);
-    assert.match(readDiagnostics(), /steering reconciliation refused channel=[0-9a-f-]+ reason=this process wrote the block/);
+    const resumed = await turn();
+    assert.ok(resumed?.result, `expected same-process steering reconciliation, got ${JSON.stringify(resumed)}`);
+    assert.equal(counters.prompts, 2);
+    assert.equal((await archives()).length, 1, 'the settled blocked bridge must be archived once');
+    assert.equal(JSON.parse(await readFile(join(bridgeDir, 'state.json'), 'utf8')).guardBlocked, false);
+    assert.match(readDiagnostics(), /steering bridge reconciled channel=[0-9a-f-]+ archived=/);
   } finally { await dispose(); }
 });

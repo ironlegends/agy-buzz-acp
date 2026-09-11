@@ -128,12 +128,11 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
     return { ownerId, rootDir, bridgeDir: join(rootDir, `channel-${bridgeKey}`), steeringSessionId };
   }
 
-  // Channels this process blocked itself and has not saved since. A block this
-  // adapter created is still terminal: the turn behind it may have started the
-  // provider or left an ambiguous external effect, and only an operator can settle
-  // that. Reconciliation is for the opposite case, a block nobody is left to answer
-  // for, found on disk by a process that did not write it.
-  const channelsBlockedHere = new Set();
+  // Channels whose current turn has invalidated durable state and has not yet
+  // finished. This is a liveness guard, not process-lifetime ownership: once the
+  // turn fully settles, a later prompt may reconcile under the durable outbox and
+  // channel-lock guards, exactly as a fresh adapter process would.
+  const channelsWithLiveBlock = new Set();
 
   // Durable half of the same question, and the only one that survives a restart: an
   // outbox record still `inflight` or `uncertain` means an external effect happened
@@ -166,32 +165,14 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
     return false;
   };
 
-  // Names the condition that refuses reconciliation, or null when all of them hold.
-  // A refusal has to say which door closed: a bare terminal block gives an operator
-  // no way to tell a guard doing its job from a fault.
-  //
-  // `channelBusyElsewhere` is defence in depth and is not falsifiable by the current
-  // suite. A live turn on the channel has already run `invalidate`, so it also sits in
-  // `channelsBlockedHere` until its `save`, and `save` is followed immediately by the
-  // removal with no injectable wait in between. It used to look falsifiable on the
-  // steering path only because that harness ran without durable state, where
-  // `channelsBlockedHere` is never filled — the same illusion the disabled outbox
-  // produced.
-  //
-  // It is kept because one race leaves it as the only guard. That race is reachable in
-  // principle and is not exercised here. The steering hook runs in the provider child,
-  // out of this process, and can move a bridge to `blocked` at any moment
-  // (`claimPendingSteer` calls `blockState`, src/steering.js:347 and :326). Meanwhile
-  // `inspectExistingSteering` runs before `activeTurns.set` and before the
-  // `agy channel session is already owned` refusal, and the ownership lock is held per
-  // process, not per session: `ownedChannels.has` short-circuits every later caller
-  // (src/session-state.js:90). So a second session of this adapter, prompting the same
-  // channel between the first turn's `scope` and its `channelsBlockedHere.add`, passes
-  // the ownership check and finds the channel absent from `channelsBlockedHere`. Only
-  // this condition then stops it from archiving a bridge that is still live. The
-  // ordering above is measured; the race itself is not. Found by Sonnet's delta review.
+  // Retain the liveness guard through cleanup; no recovery can race an active turn.
+  const settleLiveBlock = (channelId, sessionId) => {
+    if (!channelId || channelBusyElsewhere(channelId, sessionId)) return;
+    channelsWithLiveBlock.delete(channelId);
+  };
+
   const reconciliationRefusal = async (channelId, sessionId) => {
-    if (channelsBlockedHere.has(channelId)) return 'this process wrote the block';
+    if (channelsWithLiveBlock.has(channelId)) return 'a live turn in this process owns the block';
     if (channelBusyElsewhere(channelId, sessionId)) return 'another turn holds the channel';
     return unsettledDeliveryRefusal(channelId);
   };
@@ -311,7 +292,7 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
             mcpCapabilities: { http: false, sse: false }
           },
           _meta: { steering: { supported: steeringCapability } },
-            agentInfo: { name: 'agy-buzz-acp', version: '0.5.6' }
+            agentInfo: { name: 'agy-buzz-acp', version: '0.5.8' }
         }));
         return;
       }
@@ -356,7 +337,7 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
         session.setModelCatalog?.(catalog);
         sessions.set(sessionId, { session, sessionId, cwd: params.cwd,
           model: requestedModel, modelCatalog: catalog, bound: false, stateError: null,
-          steering: null });
+          steering: null, systemPrompt, needsReplacement: false });
         if (id !== undefined) write(rpcResult(id, { sessionId, configOptions: modelConfigOptions(catalog, requestedModel) }));
         return;
       }
@@ -395,7 +376,7 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
         if (Object.prototype.hasOwnProperty.call(params, 'model')) throw Object.assign(new Error('model override is not supported'), { rpcCode: -32602 });
         const entry = sessions.get(params.sessionId);
         if (!entry) throw Object.assign(new Error('unknown session'), { rpcCode: -32001 });
-        const session = entry.session;
+        let session = entry.session;
         if (activeTurns.has(params.sessionId)) throw Object.assign(new Error('session turn is busy'), { rpcCode: -32002 });
         if (entry.stateError) throw Object.assign(new Error(entry.stateError), { rpcCode: -32603, rpcMessage: entry.stateError });
         const text = promptToText(params.prompt);
@@ -409,38 +390,44 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
           throw Object.assign(new Error('agy session channel scope cannot change'), { rpcCode: -32602, rpcMessage: 'agy session channel scope cannot change' });
         }
         entry.channelId ??= buzzContext.channelId;
-        if (steeringCapability) await inspectExistingSteering(entry, buzzContext.channelId, params.sessionId);
+        // Reserve before the first await, including steering inspection/recovery.
         const controller = new AbortController();
         activeTurns.set(params.sessionId, controller);
         let stateScope = null;
         try {
+          if ((sessionState?.enabled || steeringCapability) && channelBusyElsewhere(buzzContext.channelId, params.sessionId)) {
+            throw steeringRpcError('agy channel turn is busy');
+          }
           if (sessionState?.configurationError) {
             throw Object.assign(new Error(sessionState.configurationError), { rpcCode: -32602, rpcMessage: sessionState.configurationError });
           }
           if (sessionState?.enabled) {
-            if (entry.stateError) throw Object.assign(new Error(entry.stateError), { rpcCode: -32603, rpcMessage: entry.stateError });
             await sessionState.verifyIdentity(makeIdentity);
             stateScope = await sessionState.scope({ channelId: buzzContext.channelId, cwd: entry.cwd, model: entry.model });
             const existingSessionId = channelSessions.get(buzzContext.channelId);
             if (existingSessionId && existingSessionId !== params.sessionId) {
               throw Object.assign(new Error('agy channel session is already owned'), { rpcCode: -32002, rpcMessage: 'agy channel session is already owned' });
             }
-            // Maintenance constraint: `channelSessions` is never purged on success. The
-            // entry is removed only on the failure path of this turn, so a channel stays
-            // pinned to its first successful session for the life of the process. That is
-            // the intent — a second session must be refused above, not silently take the
-            // channel over — but it also means a session that ends cleanly keeps the pin.
             channelSessions.set(buzzContext.channelId, params.sessionId);
-            // Every turn re-reads the record: `load` is the guard that refuses a block
-            // left by an incomplete turn. Binding the trusted conversation stays a
-            // one-off, because the provider refuses it once a child is running.
+          }
+          if (entry.needsReplacement) {
+            if (!stateScope) throw steeringRpcError('agy recovery requires durable session state');
+            const refusal = await reconciliationRefusal(buzzContext.channelId, params.sessionId);
+            if (refusal) {
+              report(`session recovery refused channel=${buzzContext.channelId} reason=${refusal}`);
+              throw Object.assign(new Error('agy session state is blocked after an incomplete turn'), { rpcMessage: 'agy session state is blocked after an incomplete turn' });
+            }
+            if (typeof session.retireForRecovery !== 'function' || await session.retireForRecovery() !== true) {
+              throw steeringRpcError('agy provider retirement could not be confirmed');
+            }
+          }
+          // A failed provider must be confirmed closed BEFORE disk reconciliation.
+          if (steeringCapability) await inspectExistingSteering(entry, buzzContext.channelId, params.sessionId);
+          if (sessionState?.enabled) {
             let saved;
             try {
               saved = await sessionState.load(stateScope);
             } catch (error) {
-              // A record left blocked by a turn that never reached `save` is repaired
-              // here instead of waiting for an operator. The guard stays closed while
-              // another turn of this adapter is running on the channel.
               if (error?.code !== 'AGY_SESSION_STATE_BLOCKED') throw error;
               const refusal = await reconciliationRefusal(buzzContext.channelId, params.sessionId);
               if (refusal) {
@@ -452,12 +439,26 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
               report(`session record reconciled channel=${buzzContext.channelId} conversation=${outcome.conversationId ?? 'none'}`);
               saved = await sessionState.load(stateScope);
             }
+            if (entry.needsReplacement) {
+              // Do not reset contextLost on the failed object or reuse its buffers.
+              // Rebind only the association validated above, never an unconfirmed ID.
+              const replacement = makeSession({ sessionId: params.sessionId, cwd: entry.cwd,
+                model: entry.model, systemPrompt: entry.systemPrompt });
+              if (!replacement || replacement === session) throw steeringRpcError('agy replacement session is unavailable');
+              replacement.setModelCatalog?.(entry.modelCatalog);
+              entry.session = session = replacement;
+              entry.bound = false;
+              entry.steering = null;
+              entry.needsReplacement = false;
+              report(`provider session rebuilt channel=${buzzContext.channelId}; interrupted work is not replayed by the adapter`);
+              emitDeliveryDiagnostic(params.sessionId, 'Previous turn interrupted; provider session rebuilt. Prior correction consumption and external effects may remain uncertain.');
+            }
             if (!entry.bound) {
               if (saved) session.setTrustedConversation?.(saved.conversationId);
               entry.bound = true;
             }
             await sessionState.invalidate(stateScope);
-            channelsBlockedHere.add(buzzContext.channelId);
+            channelsWithLiveBlock.add(buzzContext.channelId);
           }
           if (steeringCapability) await ensureSteering(entry, buzzContext.channelId);
           if (outbox?.configurationError) {
@@ -468,7 +469,12 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
           if (controller.signal.aborted) throw Object.assign(new Error('prompt cancelled'), { code: 'CANCELLED' });
         } catch (error) {
           activeTurns.delete(params.sessionId);
-          if (channelSessions.get(buzzContext.channelId) === params.sessionId) channelSessions.delete(buzzContext.channelId);
+          settleLiveBlock(buzzContext.channelId, params.sessionId);
+          // Retain the channel pin after an unconfirmed retirement: a new ACP
+          // session must not bypass the failed session's recovery guard.
+          if (!entry.needsReplacement && channelSessions.get(buzzContext.channelId) === params.sessionId) {
+            channelSessions.delete(buzzContext.channelId);
+          }
           if (stateScope) blockEntry(entry);
           throw error;
         }
@@ -494,6 +500,9 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
           }), (update) => {
             if (update && typeof update === 'object') emitActivity(params.sessionId, update);
           });
+          if (typeof response !== 'string' || !response.trim()) {
+            throw Object.assign(new Error('provider produced an empty response'), { rpcCode: -32603, rpcMessage: 'provider produced an empty response' });
+          }
           deliveryActivity('tool_call', 'Response produced', 'pending');
           let recoveryId = null;
           let durabilityFailed = false;
@@ -555,10 +564,10 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
                 await sessionState.save(stateScope, conversationId);
                 // Maintenance constraint: this removal stays immediately after the save,
                 // with no await in between. `reconciliationRefusal` reads
-                // `channelsBlockedHere` as the in-process proof that a live turn owns the
+                // `channelsWithLiveBlock` as the in-process proof that a live turn owns the
                 // channel. A gap between the two would show the channel as free while the
                 // record on disk is already settled, or the reverse if the order flipped.
-                channelsBlockedHere.delete(buzzContext.channelId);
+                channelsWithLiveBlock.delete(buzzContext.channelId);
                 turnSafe = true;
               } else {
                 blockEntry(entry);
@@ -597,8 +606,12 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
             write(rpcResult(id, { stopReason: 'end_turn', publication: delivery }));
           }
         } finally {
-          if (providerStarted && !turnSafe) blockEntry(entry);
+          if (providerStarted && !turnSafe) {
+            blockEntry(entry);
+            entry.needsReplacement = true;
+          }
           activeTurns.delete(params.sessionId);
+          settleLiveBlock(buzzContext.channelId, params.sessionId);
         }
         return;
       }
