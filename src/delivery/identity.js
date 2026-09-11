@@ -26,7 +26,7 @@ export function getBuzzPublicKey({ command = 'buzz', prefixArgs = [], spawnFn = 
       clearTimeout(timer);
       error ? reject(error) : resolve(value);
     };
-    try { child = spawn(command, [...prefixArgs, '--format', 'json', 'users', 'get'], { shell: false, stdio: ['ignore', 'pipe', 'ignore'] }); }
+    try { child = spawnFn(command, [...prefixArgs, '--format', 'json', 'users', 'get'], { shell: false, stdio: ['ignore', 'pipe', 'ignore'] }); }
     catch { finish(new Error('Buzz identity lookup failed to start')); return; }
     child.stdout.setEncoding('utf8');
     child.stdout.on('data', (chunk) => {
