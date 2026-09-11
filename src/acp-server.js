@@ -7,7 +7,7 @@ import { parseBuzzContext } from './buzz-context.js';
 import { BuzzPublisher } from './buzz-publisher.js';
 import { createConfiguredOutbox } from './delivery/outbox.js';
 import { getBuzzPublicKey } from './delivery/identity.js';
-import { createConfiguredSessionState } from './session-state.js';
+import { ownershipFailureReason, createConfiguredSessionState } from './session-state.js';
 import { listModels, modelConfigOptions } from './models.js';
 import { createSteeringCoordinator, inspectSteeringBridge, reconcileSteeringBridge, MAX_STEERING_TEXT_LENGTH } from './steering.js';
 
@@ -185,7 +185,7 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
   const steeringReconciliationRefusal = async (channelId, sessionId) => {
     if (!sessionState?.enabled) return 'durable session state is disabled';
     try { await sessionState.ensureOwnership(channelId); }
-    catch { return 'the channel ownership lock is held elsewhere'; }
+    catch (error) { return ownershipFailureReason(error); }
     return reconciliationRefusal(channelId, sessionId);
   };
 

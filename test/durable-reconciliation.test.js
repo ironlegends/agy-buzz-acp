@@ -517,3 +517,25 @@ test('a bridge blocked by a settled turn of this process is reconciled on the ne
     assert.match(readDiagnostics(), /steering bridge reconciled channel=[0-9a-f-]+ archived=/);
   } finally { await dispose(); }
 });
+
+for (const [code, reason] of [
+  ['AGY_SESSION_STATE_PERMISSIONS', 'permissions are insufficient'],
+  ['AGY_SESSION_STATE_LEGACY_LOCK', 'legacy channel lock'],
+  ['AGY_SESSION_STATE_NATIVE_UNAVAILABLE', 'native channel locking is unavailable'],
+  ['AGY_SESSION_STATE_UNSAFE_LOCK', 'lock path is unsafe'],
+  ['AGY_SESSION_STATE_SCOPE', 'scope is invalid'],
+  ['UNKNOWN', 'could not be established']
+]) test(`steering refusal preserves ownership category ${code} without mutation`, async () => {
+  const {state, turn, counters, setGuard, archives, bridgeDir, readDiagnostics, dispose}=await steeringHarness();
+  try {
+    await turn(); await setGuard(true);
+    const before=await readFile(join(bridgeDir,'state.json'),'utf8');
+    state.ensureOwnership=async()=>{throw Object.assign(new Error('private-error-path-must-not-escape'),{code});};
+    const refused=await turn();
+    assert.ok(refused.error); assert.equal(counters.prompts,1); assert.deepEqual(await archives(),[]);
+    assert.equal(await readFile(join(bridgeDir,'state.json'),'utf8'),before);
+    assert.ok(readDiagnostics().includes(reason));
+    assert.equal(readDiagnostics().includes('private-error-path-must-not-escape'),false);
+    assert.equal(readDiagnostics().includes('held elsewhere'),false);
+  } finally {await dispose();}
+});
