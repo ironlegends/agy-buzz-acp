@@ -208,8 +208,19 @@ export class AgySession {
   sendPendingPrompt() {
     if (!this.pending || this.pending.started || !this.child || this.awaitingResumeInit) return;
     const pending = this.pending;
-    const content = !pending.resuming && !this.sentSystemPrompt && this.systemPrompt
-      ? `${this.systemPrompt}\n\n--- Buzz ACP bridge ---\nThe wrapper publishes your final response to Buzz using the platform transport. Return only the final answer; do not call Buzz tools or attempt to publish.\n--- End Buzz ACP bridge ---\n\n--- Buzz system prompt / user prompt ---\n${pending.text ?? ''}`
+    // Adapted from Xeoneid PR #9. Resumed conversations may predate the
+    // directive, so deliver it once per provider process, not only fresh chats.
+    const bridgeInstruction = '--- Buzz ACP bridge ---\nThe wrapper publishes your final response to Buzz using the platform transport. Return your final answer as text; do not publish this reply with buzz messages send or another transport. Other authorized Buzz operations remain available.\n--- End Buzz ACP bridge ---';
+    const firstInProcess = !this.sentSystemPrompt;
+    const system = firstInProcess && !pending.resuming && this.systemPrompt
+      ? `${this.systemPrompt}
+
+` : '';
+    const content = firstInProcess
+      ? `${system}${bridgeInstruction}
+
+--- Buzz system prompt / user prompt ---
+${pending.text ?? ''}`
       : pending.text;
     try {
       this.child.stdin.write(JSON.stringify({ event: 'user', message: { content } }) + '\n');
