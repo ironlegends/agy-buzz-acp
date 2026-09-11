@@ -1,6 +1,6 @@
 ## Historical design document (version 0.2.0)
 
-> Note: This document describes historical version 0.2.0 design and is superseded by `docs/OFFICIAL_BUZZ_RECOVERY.md` and `docs/COMPATIBILITY.md` for version 0.5.3.
+> Note: This document describes historical version 0.2.0 design and is superseded by `docs/OFFICIAL_BUZZ_RECOVERY.md` and `docs/COMPATIBILITY.md` for the current release.
 
 The 0.2.0 work keeps the provider sandbox and Buzz routing contract. Portable diagnostics, installation examples and CI are separate from lifecycle recovery.
 

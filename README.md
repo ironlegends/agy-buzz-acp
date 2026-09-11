@@ -13,6 +13,8 @@ This is a community adapter for Buzz. It is not a general-purpose ACP client ada
 
 The JavaScript runtime uses standard Node APIs. Windows has real-provider validation; Linux and macOS require their own provider smoke tests. Automated fixture CI does not prove provider availability, account eligibility, or graphical rendering on every OS.
 
+Upgrading from 0.4.x? Read the [0.4.x to 0.5.8 migration guide](docs/MIGRATING_04_TO_05.md) before changing a working installation. Steering is opt-in, but native locks and durable-checkpoint lifecycle changes also apply without steering.
+
 ## Install and register
 
 Download an archive from the [releases page](https://github.com/ironlegends/agy-buzz-acp/releases), or build from a source checkout:
@@ -98,7 +100,9 @@ Delivery states:
 
 ## Conversation continuity
 
-The adapter rotates an aging provider process between completed turns, at 21 hours, leaving three hours before agy's 24-hour process limit (one hour of dispatch margin beyond a two-hour Buzz turn). It waits for the old child to close, starts `agy --conversation` with the confirmed identifier, and requires a matching `init` before sending the next prompt. Rotation does not interrupt an active turn or replay a previous prompt.
+Without durable state or steering, the adapter reuses its provider and rotates an aging provider process between completed turns, at 21 hours, leaving three hours before agy's 24-hour process limit (one hour of dispatch margin beyond a two-hour Buzz turn). It waits for the old child to close, starts `agy --conversation` with the confirmed identifier, and requires a matching `init` before sending the next prompt. Rotation does not interrupt an active turn or replay a previous prompt.
+
+With durable state enabled, the provider instead retires after each successfully delivered and checkpointed turn, then restarts with the validated conversation for the next turn. This trades startup/resume latency for a confirmed provider-stop boundary.
 
 For optional continuity across adapter termination and restart, configure both `AGY_SESSION_DIR` and `AGY_SESSION_OWNER`. Buzz must supply `BUZZ_RELAY_URL`. A configured `AGY_RELAY_URL` must agree with that actual publisher endpoint; it cannot silently override it for session recovery. Version 0.5.3 uses native OS locks, so recovery does not depend on a graceful Buzz shutdown after a completed checkpoint.
 
@@ -106,7 +110,7 @@ Associations are scoped to the verified public Buzz identity, relay, canonical w
 
 Corrupted state and mismatched scope block automatic recovery. A native lock file may remain after release; its presence is not evidence of an active owner. The adapter does not automatically remove lock files, replay interrupted work or reconcile uncertain relay publication. The recovery CLI described below is for retained answers, not for overriding conversation locks.
 
-A record left blocked by an interrupted turn is reconciled on the next prompt only after the turn that wrote it has fully settled. Three durable/liveness conditions must hold: the adapter holds the channel ownership lock, which no second adapter can take; no turn is still running on that channel; and no `inflight` or `uncertain` delivery for that channel remains in the outbox. The 0.5.8 candidate additionally requires a bounded, confirmed provider close before reconciling a failed turn in the same process. It constructs a new provider-session object and binds only the validated stored conversation, without clearing context-loss flags on the failed object. Unknown retirement refuses without archiving the bridge. The conversation is resumed when the record still names one, and the record is removed when the turn died before any conversation existed. A blocked steering bridge is renamed to a sibling `-archived-<timestamp>` directory and rebuilt. Reconciliation therefore requires both a private session directory and a delivery outbox: without the outbox the delivery condition cannot be evaluated, and a condition that cannot be evaluated refuses. Every reconciliation and every refusal writes a diagnostic line naming the condition that closed the door. Reconciliation lifts a block; it never internally resubmits the interrupted prompt or archived correction and never turns an uncertain publication into a delivered one. The next submitted prompt is separate: Buzz may itself requeue prior events, so this is not an exactly-once guarantee for external tools. Archived corrections remain of uncertain consumption, not proven undelivered.
+A record left blocked by an interrupted turn is reconciled on the next prompt only after the turn that wrote it has fully settled. Three durable/liveness conditions must hold: the adapter holds the channel ownership lock, which no second adapter can take; no turn is still running on that channel; and no `inflight` or `uncertain` delivery for that channel remains in the outbox. Version 0.5.8 additionally requires a bounded, confirmed provider close before reconciling a failed turn in the same process. It constructs a new provider-session object and binds only the validated stored conversation, without clearing context-loss flags on the failed object. Unknown retirement refuses without archiving the bridge. The conversation is resumed when the record still names one, and the record is removed when the turn died before any conversation existed. A blocked steering bridge is renamed to a sibling `-archived-<timestamp>` directory and rebuilt. Reconciliation therefore requires both a private session directory and a delivery outbox: without the outbox the delivery condition cannot be evaluated, and a condition that cannot be evaluated refuses. Every reconciliation and every refusal writes a diagnostic line naming the condition that closed the door. Reconciliation lifts a block; it never internally resubmits the interrupted prompt or archived correction and never turns an uncertain publication into a delivered one. The next submitted prompt is separate: Buzz may itself requeue prior events, so this is not an exactly-once guarantee for external tools. Archived corrections remain of uncertain consumption, not proven undelivered.
 
 To deliberately start a new conversation instead, configure a new empty private session directory and preserve the old directory as evidence. This is an operator decision that discards continuity; it is not automatic recovery or prompt replay.
 
@@ -123,7 +127,7 @@ agy-buzz-recover show RECOVERY_ID
 agy-buzz-recover retry RECOVERY_ID
 ```
 
-The recovery command verifies the current public Buzz identity. `show` intentionally prints the retained answer. `retry` only accepts `failed-before-start` and claims the record before publishing. A stale retry lock remains blocked for operator reconciliation. It never retries `sent`, `uncertain`, or an interrupted publication blindly.
+The recovery command verifies the current public Buzz identity. `show` intentionally prints the retained answer. `retry` only accepts `failed-before-start` and claims the record before publishing. A legacy retry-lock directory remains blocked for operator reconciliation. A native lock file may remain after release; file presence alone does not establish that the lock is held. It never retries `sent`, `uncertain`, or an interrupted publication blindly.
 
 If an enabled outbox cannot write, the active adapter can retain a `mem_*` recovery ID in memory. That ID disappears when the adapter exits and cannot be recovered by a separate CLI process.
 

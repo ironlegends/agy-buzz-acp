@@ -41,8 +41,7 @@ When `AGY_OUTBOX_DIR` or `AGY_SESSION_DIR` is configured correctly and the
 directory is readable, the report summarizes JSON records as `ready`,
 `blocked`, `uncertain` and `invalid` counts. Outbox status categories also
 retain the safe names `sent`, `failed-before-start`, `inflight` and
-`uncertain`. Session and outbox lock totals are reported separately, with
-dead session owners marked stale when the process can be checked. Unknown
+`uncertain`. Session and outbox lock totals are reported separately. Persistent native files are counted as `native-file`; their presence does not prove ownership and Doctor does not acquire them. Only legacy lock directories with PID metadata can be marked stale when that process can be checked. Unknown
 lock ownership remains unknown, and a live PID is only reported as
 `live-pid`, not proof that the lock is valid. Record contents, recovery IDs,
 conversation IDs, owner values, paths and raw filesystem errors are omitted.
@@ -53,7 +52,10 @@ the size of each record file, and refuses symbolic-link roots, records and
 locks. Blocked, uncertain, invalid, truncated and stale findings make the
 store diagnostic a warning; the scanner never treats them as ready.
 
-An `inflight` record is only counted as `uncertain`; unlike the normal outbox
-reader, the doctor never transitions it. Stale locks are evidence for manual
+An `inflight` record is only counted as `uncertain`; the doctor never transitions it. Outbox list scans are also read-only for delivery records in 0.5.8, whereas explicit get/show paths may classify abandoned inflight work as uncertain. Stale locks are evidence for manual
 operator reconciliation. The doctor does not unlock, retry, delete, or
 rewrite anything.
+
+## Scope in released 0.5.8
+
+Doctor inspects session/outbox stores, not dedicated steering bridges. Its success does not establish that steering is recoverable or a running provider has stopped. Automatic reconciliation requires both durable session state and an enabled readable outbox, in addition to runtime ownership/liveness checks. Issue #6 tracks the missing steering inspection and guided recovery diagnostics.

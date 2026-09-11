@@ -15,7 +15,7 @@ Native OS file locks protect concurrent access. A lock file can remain on disk a
 
 The separate ready/blocked record controls whether a conversation can resume. Before external work, the record becomes blocked. It becomes ready only after acknowledged delivery, a confirmed provider conversation and provider retirement. With durable state enabled, the provider starts again for each subsequent turn and must confirm the saved conversation before receiving the new prompt. This adds startup latency while avoiding an idle provider behind a ready checkpoint.
 
-A failed or uncertain started turn leaves the record blocked. With durable state enabled that record is authoritative: every prompt reads it again, so the adapter keeps no separate in-memory verdict, and a record repaired on disk is honoured by the next prompt without restarting the adapter. Without durable state there is nothing to re-read, so the session stays blocked in memory until the adapter restarts. The same rule applies to the steering bridge, which is inspected on disk on every prompt. Restarting cannot turn incomplete work into completed work. An uncertain message or external tool action is not automatically replayed. Publication and local persistence are not one transaction; exactly-once external execution is not promised.
+A failed or uncertain started turn leaves the record blocked. With durable state enabled every prompt re-reads the record, but disk repair alone is insufficient: in-memory provider liveness, pending operations and the needsReplacement flag still guard recovery. The previous provider must be confirmed closed before the failed AgySession is replaced. Without durable state there is nothing to re-read, so the session stays blocked in memory until the adapter restarts. The same rule applies to the steering bridge, which is inspected on disk on every prompt. Restarting cannot turn incomplete work into completed work. An uncertain message or external tool action is not automatically replayed. Publication and local persistence are not one transaction; exactly-once external execution is not promised.
 
 Provider retirement proves exit of the direct provider. It does not roll back background tools or external effects. A blocked record requires reconciliation before a conversation is reused, and the adapter reconciles it automatically on the next prompt only once the turn that wrote the block has fully settled. The adapter must hold the session ownership lock, no turn may still be running on that channel, and the outbox must hold no `inflight` or `uncertain` delivery for that channel. For a failed turn in the same process, 0.5.8 also awaits the previous provider close event within a bound BEFORE any disk reconciliation. A null child reference or a successful kill request is not sufficient. It constructs a fresh AgySession, retains the ACP session ID, model and caller system instructions, and rebinds only the validated durable association. An unconfirmed close keeps state blocked. This does not establish that external tools were rolled back or that an archived correction was never consumed. A record that still names a conversation resumes it; a record blocked before any conversation existed is removed so the next turn starts fresh. A blocked steering bridge is renamed to a sibling `-archived-<timestamp>` directory, never deleted, and rebuilt on the same prompt. Each reconciliation writes a diagnostic line naming the channel, the conversation and the archive. Nothing else is repaired automatically: a record whose scope does not match, a bridge bound to another owner or channel, or an unsettled delivery is refused exactly as before.
 
@@ -46,7 +46,7 @@ The package installs the hook entry point with the other commands. A reviewed ag
 }
 ```
 
-Use an absolute `node` and adapter path in a real installation. Install the 0.5.3 archive completely so the native dependency is available.
+Use an absolute `node` and adapter path in a real installation. Install the matching release archive completely so the native dependency is available.
 
 ### Activation procedure
 
@@ -109,9 +109,9 @@ This evidence is separate from the synthetic fixture suite and does not claim pr
 
 Restoring a previously modified sidecar requires an exact version/digest check and a recoverable backup. This document describes the current installation contract and does not perform installation.
 
-## Validation scope for the 0.5.8 candidate
+## Validation scope for released 0.5.8
 
-The fault matrix starts the actual adapter entry point and its packaged hook as subprocesses, with the real AgySession, native locks, durable state and outbox. Only the provider and publisher endpoints are synthetic. It includes missing/late confirmation, same-process recovery, concurrent work, and uncertain publication. Unit tests separately refuse recovery without a close event. These checks are not live Google/Buzz validation. The adapter does not internally replay old input, but Buzz queue retries are a separate source of incoming work and require independent end-to-end review.
+The fault matrix starts the actual adapter entry point and its packaged hook as subprocesses, with the real AgySession, native locks, durable state and outbox. Only the provider and publisher endpoints are synthetic. It includes missing/late confirmation, same-process recovery, concurrent work, and uncertain publication. Unit tests separately refuse recovery without a close event. These fixture checks are not live Google/Buzz validation. Separate 0.5.8 genuine-provider fault tests and a Desktop/relay round trip were subsequently recorded; see COMPATIBILITY.md for the evidence levels and release reference. The adapter does not internally replay old input, but Buzz queue retries are a separate source of incoming work and require independent end-to-end review.
 
 ## Concurrent recovery and Windows file replacement
 
