@@ -77,7 +77,7 @@ async function harness(name, { uncertain = false } = {}) {
     bridge: () => readJson(join(dir, 'steering', `channel-${bridgeKey}`, 'state.json')),
     record: () => readJson(join(dir, 'sessions', `${sessionKey}.json`)),
     archives: async () => { try { return (await readdir(join(dir, 'steering'))).filter((name) => name.includes('-archived-')); } catch { return []; } },
-    prompt: (text) => call('session/prompt', { sessionId, prompt: context(text) }),
+    prompt: (text) => { app.lastPromptId = next; return call('session/prompt', { sessionId, prompt: context(text) }); },
     steer: () => call('_session/steering', { sessionId, prompt: [{ type: 'text', text: 'Synthetic correction: answer CORRECTED only.' }] }),
     async command(pid, message) { const n = (commands.get(pid) ?? 0) + 1; commands.set(pid, n); await writeFile(join(dir, `command.${pid}.${n}.json`), JSON.stringify(message)); },
     async close() {
@@ -94,7 +94,11 @@ async function harness(name, { uncertain = false } = {}) {
   return app;
 }
 async function started(app, nth) {
-  return until(async () => (await app.trace()).filter((item) => item.kind === 'promptReceived')[nth - 1], `provider prompt ${nth}`);
+  return until(async () => {
+    const response = app.wire.find((m) => m.id === app.lastPromptId);
+    if (response?.error) throw new Error(`Provider startup refused: ${JSON.stringify(response.error)}; ${app.diagnostics()}`);
+    return (await app.trace()).filter((item) => item.kind === 'promptReceived')[nth - 1];
+  }, `provider prompt ${nth}`);
 }
 async function ordinary(app, nth) {
   const turn = app.prompt(`Synthetic independent turn ${nth}: answer BASE only.`);
