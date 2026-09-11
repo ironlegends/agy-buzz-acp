@@ -19,7 +19,8 @@ for (const retirementFails of [false, true]) {
         return null;
       },
       invalidate: async () => { record = 'blocked'; },
-      save: async () => { assert.equal(retired, true, 'ready cannot precede provider exit'); record = 'ready'; },
+      stageCheckpoint: async () => { assert.equal(retired, true); assert.equal(delivered, false); assert.equal(record, 'blocked'); },
+      save: async () => { assert.equal(retired, true, 'ready cannot precede provider exit'); assert.equal(delivered, true); record = 'ready'; },
       release: async () => {} };
     const server = createAcpServer({ input: new PassThrough(), output: new PassThrough(), diagnostics: new PassThrough(),
       sessionStateFactory: () => state, outboxFactory: () => null,
@@ -27,7 +28,7 @@ for (const retirementFails of [false, true]) {
         getConversationId: () => 'confirmed', hasConfirmedConversation: () => true,
         retireForCheckpoint: async () => {
           retirementCalls++;
-          assert.equal(delivered, true);
+          assert.equal(delivered, false);
           assert.equal(record, 'blocked');
           if (retirementFails) throw new Error('provider still alive');
           retired = true;
@@ -43,6 +44,7 @@ for (const retirementFails of [false, true]) {
         { type: 'text', text: 'Synthetic test' }] };
       await call(3, 'session/prompt', params);
       assert.equal(retirementCalls, 1);
+      assert.equal(delivered, !retirementFails);
       assert.equal(record, retirementFails ? 'blocked' : 'ready');
       if (retirementFails) {
         await call(4, 'session/prompt', params);

@@ -288,6 +288,7 @@ test('terminally blocks an ACP entry after uncertain publication before the next
       prompt: async () => { promptCalls += 1; return 'answer'; },
       getConversationId: () => 'conversation-1',
       hasConfirmedConversation: () => true,
+      retireForCheckpoint: async () => "conversation-1",
       cancel() {}, close() {}
     }),
     publisherFactory: () => publisher

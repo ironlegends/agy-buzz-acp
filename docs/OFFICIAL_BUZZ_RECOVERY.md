@@ -118,3 +118,13 @@ The fault matrix starts the actual adapter entry point and its packaged hook as 
 Outbox listing is read-only with respect to delivery records, so a recovery scan on one channel cannot overwrite a concurrently completed publication on another. Live `inflight` records remain a recovery guard.
 
 Steering mutations wait at most two seconds for transient native-lock contention before failing closed. Teardown `block()` remains non-waiting. The protected mutation is never retried. On Windows only, an atomic file rename denied with EPERM/EACCES/EBUSY is retried for at most 500 ms; permanent denial remains an error. Only the uncommitted rename is retried, not a provider request, published message, or completed steering transition.
+
+## 0.5.9 maintenance boundaries
+
+For durable turns the ordering is now: block the record; run the provider; confirm successful completion and provider retirement; stage its confirmed conversation ID while still blocked; prepare the outbox; publish; record delivery; save ready. Staging changes no version-1 fields or scope rules. Ready, corrupt, foreign-scope or missing records cannot be staged. A failed retirement/staging operation prevents publication. The outbox still gates recovery after inflight/uncertain delivery; the stored ID is not evidence of successful publication. A prior same-ID conversation is not a historical snapshot, and no lost older-release identifier is reconstructed.
+
+The direct provider may be closed before the UI displays publication completion. This ordering intentionally closes the association-loss window; process death, not power-loss durability, is the tested boundary. If Buzz retries an old event batch, that is new incoming input to the adapter, not an exactly-once promise.
+
+An ownership lease newly acquired by a failed preflight may be released only while its active reservation is still held and only if this ACP session has neither bound a cached conversation nor started a provider and needs no provider replacement. Previously held leases, live/uncertain providers and leases whose release cannot be confirmed stay protected. Native lock files are preserved.
+
+Doctor now examines only steering binding/state metadata, not request text or acknowledgement payloads. Manual recovery guidance requires first stopping all affected providers/adapters, retaining evidence and checking uncertain effects, then archiving rather than deleting the blocked bridge. It never performs that operation.

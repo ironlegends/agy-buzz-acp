@@ -39,6 +39,7 @@ test('packages only the ACP runtime and required documentation', () => {
     'bin/agy-buzz-manage.js',
     'src/manage.js',
     'src/status.js',
+    'src/steering-diagnostics.js',
     'src/steering.js'
   ]);
   const files = new Set(packageJson.files);
@@ -65,6 +66,7 @@ test('packages only the ACP runtime and required documentation', () => {
     'src/agy-session.js',
     'src/prompt.js',
     'src/doctor.js',
+    'src/steering-diagnostics.js',
     'src/steering.js',
     'docs/COMPATIBILITY.md',
     'docs/DIAGNOSTICS.md',

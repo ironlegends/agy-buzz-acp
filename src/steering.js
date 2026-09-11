@@ -740,3 +740,8 @@ export async function createSteeringCoordinator({
     return new SteeringCoordinator({ bridgeDir: path, binding: effectiveBinding, enabled: true, hookConfigured, injectorExclusive, conversationBound });
   });
 }
+
+// Shared pure validation for offline diagnostics; does not acquire or mutate state.
+export function validateSteeringSnapshot(binding, state) {
+  validateState(state, validateBinding(binding));
+}

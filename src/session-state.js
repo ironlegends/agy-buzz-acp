@@ -132,6 +132,20 @@ export class SessionState {
     }
   }
 
+  ownsChannel(channelId) {
+    return this.ownedChannels.has(channelId);
+  }
+
+  // Only the server's reserved, never-started preflight may release this lease.
+  // Keep the map entry until release succeeds; never unlink a native lock file.
+  async releaseOwnership(channelId) {
+    const lock = this.ownedChannels.get(channelId);
+    if (!lock) return false;
+    await lock.release();
+    this.ownedChannels.delete(channelId);
+    return true;
+  }
+
   async release() {
     let failure;
     for (const lock of this.ownedChannels.values()) {
@@ -184,6 +198,34 @@ export class SessionState {
     if (!sameScope(record.scope, scope)) throw stateError('agy session state scope mismatch', 'AGY_SESSION_SCOPE_MISMATCH');
     if (record.status !== 'ready') throw stateError('agy session state is blocked after an incomplete turn', 'AGY_SESSION_STATE_BLOCKED');
     return record;
+  }
+
+  // Remember the completed, retired provider while the turn remains blocked.
+  // This version-1 record remains compatible with existing readers. The server
+  // must do this before publication; readiness still requires delivery success.
+  async stageCheckpoint(scope, conversationId) {
+    if (!this.enabled) return null;
+    if (!validScope(scope) || !CONVERSATION_RE.test(conversationId ?? '')) {
+      throw stateError('agy session state cannot stage an invalid association');
+    }
+    await this.ensureOwnership(scope.channelId);
+    let current;
+    try { current = sanitizeRecord(JSON.parse(await readFile(this.path(scope.channelId), 'utf8'))); }
+    catch { throw stateError('agy session state cannot stage an unreadable association'); }
+    if (!sameScope(current.scope, scope)) throw stateError('agy session state scope mismatch', 'AGY_SESSION_SCOPE_MISMATCH');
+    if (current.status !== 'blocked') throw stateError('agy session state must be blocked before staging');
+    const staged = { ...current, conversationId, status: 'blocked', updatedAt: this.nowFn() };
+    const target = this.path(scope.channelId);
+    const temp = join(this.dir, `.${scopeKey(scope.channelId)}.${randomUUID()}.tmp`);
+    try {
+      await writeFile(temp, `${JSON.stringify(staged)}\n`, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
+      await rename(temp, target);
+      await chmod(target, 0o600);
+    } catch {
+      await rm(temp, { force: true }).catch(() => {});
+      throw stateError('agy session association could not be staged before publication');
+    }
+    return staged;
   }
 
   async save(scope, conversationId) {

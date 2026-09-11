@@ -59,3 +59,9 @@ rewrite anything.
 ## Scope in released 0.5.8
 
 Doctor inspects session/outbox stores, not dedicated steering bridges. Its success does not establish that steering is recoverable or a running provider has stopped. Automatic reconciliation requires both durable session state and an enabled readable outbox, in addition to runtime ownership/liveness checks. Issue #6 tracks the missing steering inspection and guided recovery diagnostics.
+
+## Steering metadata (0.5.9 source candidate)
+
+The report includes a steering section with explicit enablement, counts of ready, blocked, invalid and archived bridges, scan limits, and recovery guidance. Reads are bounded and reject symlinks and mismatched owner/binding metadata. Archived bridges are counted but are not treated as active blockers. No hook, provider, lock acquisition, ACL write, rename or publication is executed. IDs and raw filesystem errors are omitted.
+
+Automatic recovery configuration requires matching session/outbox/steering owners and both persistence stores. This configuration check is not a verification of live ownership, provider exit, hook execution, Windows ACL privacy or settled relay effects. Truncated/unreadable/invalid scans warn rather than declaring the installation healthy. Without durable session state or an outbox, guidance explains the missing automatic-recovery prerequisites and the guarded manual archive procedure.
