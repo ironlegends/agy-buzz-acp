@@ -208,12 +208,20 @@ export class AgySession {
   sendPendingPrompt() {
     if (!this.pending || this.pending.started || !this.child || this.awaitingResumeInit) return;
     const pending = this.pending;
-    const content = !pending.resuming && !this.sentSystemPrompt && this.systemPrompt
-      ? `${this.systemPrompt}\n\n--- Buzz ACP bridge ---\nThe wrapper publishes your final response to Buzz using the platform transport. Return only the final answer; do not call Buzz tools or attempt to publish.\n--- End Buzz ACP bridge ---\n\n--- Buzz system prompt / user prompt ---\n${pending.text ?? ''}`
-      : pending.text;
+    const bridgeInstruction = '--- Buzz ACP bridge ---\nThe wrapper publishes your final response to Buzz using the platform transport. Return only the final answer; do not call Buzz tools or attempt to publish.\n--- End Buzz ACP bridge ---';
+    let content;
+    if (!pending.resuming && !this.sentSystemPrompt) {
+      if (this.systemPrompt) {
+        content = `${this.systemPrompt}\n\n${bridgeInstruction}\n\n--- Buzz system prompt / user prompt ---\n${pending.text ?? ''}`;
+      } else {
+        content = `${bridgeInstruction}\n\n${pending.text ?? ''}`;
+      }
+      this.sentSystemPrompt = true;
+    } else {
+      content = pending.text;
+    }
     try {
       this.child.stdin.write(JSON.stringify({ event: 'user', message: { content } }) + '\n');
-      this.sentSystemPrompt = true;
       pending.started = true;
       pending.startedAt = this.childStartedAt ?? this.nowFn();
       pending.onActivity({ sessionUpdate: 'tool_call', toolCallId: `agy-${this.activityNonce}-provider-${pending.turnId}`,
