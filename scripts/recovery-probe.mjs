@@ -23,7 +23,7 @@ async function until(fn, label, ms = 20000) {
 }
 async function harness(name, { uncertain = false } = {}) {
   const dir = join(here, name + suffix); await mkdir(dir, { recursive: false });
-  const inherited = new Set(['path','systemroot','windir','comspec','temp','tmp','userprofile','localappdata','appdata','username','userdomain','homedrive','homepath','pathext','processor_architecture']);
+  const inherited = new Set(['path','systemroot','windir','comspec','temp','tmp','userprofile','localappdata','appdata','username','userdomain','homedrive','homepath','pathext','processor_architecture','systemdrive','programfiles','programfiles(x86)','programw6432','programdata','psmodulepath']);
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => inherited.has(key.toLowerCase())));
   Object.assign(env, { AGY_COMMAND: process.execPath, AGY_FAKE_SCRIPT: join(fixtures, 'fault-provider.mjs'), BUZZ_CLI_COMMAND: process.execPath, BUZZ_FAKE_SCRIPT: join(fixtures, 'fault-publisher.mjs'),
     AGY_SESSION_DIR: join(dir, 'sessions'), AGY_SESSION_OWNER: owner, AGY_OUTBOX_DIR: join(dir, 'outbox'), AGY_OUTBOX_OWNER: owner,
