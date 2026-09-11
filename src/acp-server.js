@@ -292,7 +292,7 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
             mcpCapabilities: { http: false, sse: false }
           },
           _meta: { steering: { supported: steeringCapability } },
-            agentInfo: { name: 'agy-buzz-acp', version: '0.5.8-rc.1' }
+            agentInfo: { name: 'agy-buzz-acp', version: '0.5.8' }
         }));
         return;
       }
