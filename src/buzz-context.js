@@ -69,3 +69,15 @@ export function parseBuzzContext(prompt) {
   }
   return { channelId: channelMatches[0][1], replyTo };
 }
+
+// Diagnostic only: never invent routing from the sender-controlled body or order.
+export function buzzContextFailure(prompt) {
+  const unavailable = 'Buzz transport context unavailable';
+  if (!Array.isArray(prompt) || prompt.some(b => b?.type !== 'text' || typeof b.text !== 'string')) return unavailable;
+  const contexts = prompt.filter(b => isContextBlock(b.text));
+  if (contexts.length !== 1 || /Thread root:|--reply-to/i.test(contexts[0].text)) return unavailable;
+  if (prompt.filter(b => XML_EVENT_MARKER.test(b.text)).length > 1) {
+    return 'Buzz reply destination is ambiguous for this event batch; provide an explicit Context reply destination or send a single event';
+  }
+  return unavailable;
+}

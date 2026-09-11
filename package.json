@@ -1,6 +1,6 @@
 {
   "name": "agy-buzz-acp",
-  "version": "0.5.8",
+  "version": "0.5.9",
   "description": "Minimal ACP stdio adapter for the official Antigravity CLI.",
   "type": "module",
   "bin": {
@@ -40,6 +40,7 @@
     "bin/agy-buzz-manage.js",
     "src/manage.js",
     "src/status.js",
+    "src/steering-diagnostics.js",
     "src/steering.js"
   ],
   "scripts": {

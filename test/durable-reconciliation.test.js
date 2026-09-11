@@ -371,7 +371,7 @@ test('a block from a settled turn is reconciled by the same process on the next 
     assert.ok(resumed?.result, `expected same-process reconciliation, got ${JSON.stringify(resumed)}`);
     assert.equal(counters.prompts, 2);
     assert.equal((await record()).status, 'ready');
-    assert.match(readDiagnostics(), /session record reconciled channel=[0-9a-f-]+ conversation=none/);
+    assert.match(readDiagnostics(), /session record reconciled channel=[0-9a-f-]+ conversation=conversation-1/);
   } finally { await dispose(); }
 });
 

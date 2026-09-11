@@ -3,7 +3,7 @@ import { isAbsolute, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { promptToText } from './prompt.js';
 import { AgySession } from './agy-session.js';
-import { parseBuzzContext } from './buzz-context.js';
+import { parseBuzzContext, buzzContextFailure } from './buzz-context.js';
 import { BuzzPublisher } from './buzz-publisher.js';
 import { createConfiguredOutbox } from './delivery/outbox.js';
 import { getBuzzPublicKey } from './delivery/identity.js';
@@ -292,7 +292,7 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
             mcpCapabilities: { http: false, sse: false }
           },
           _meta: { steering: { supported: steeringCapability } },
-            agentInfo: { name: 'agy-buzz-acp', version: '0.5.8' }
+            agentInfo: { name: 'agy-buzz-acp', version: '0.5.9' }
         }));
         return;
       }
@@ -337,7 +337,7 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
         session.setModelCatalog?.(catalog);
         sessions.set(sessionId, { session, sessionId, cwd: params.cwd,
           model: requestedModel, modelCatalog: catalog, bound: false, stateError: null,
-          steering: null, systemPrompt, needsReplacement: false });
+          steering: null, systemPrompt, needsReplacement: false, cachedConversationBound: false });
         if (id !== undefined) write(rpcResult(id, { sessionId, configOptions: modelConfigOptions(catalog, requestedModel) }));
         return;
       }
@@ -384,7 +384,8 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
         const buzzContext = parseBuzzContext(params.prompt);
         if (!buzzContext) {
           report(`context parse failed ${describePromptShape(params.prompt)}`);
-          throw Object.assign(new Error('Buzz transport context unavailable'), { rpcCode: -32603, rpcMessage: 'Buzz transport context unavailable' });
+          const reason = buzzContextFailure(params.prompt);
+          throw Object.assign(new Error(reason), { rpcCode: -32603, rpcMessage: reason });
         }
         if (entry.channelId && entry.channelId !== buzzContext.channelId) {
           throw Object.assign(new Error('agy session channel scope cannot change'), { rpcCode: -32602, rpcMessage: 'agy session channel scope cannot change' });
@@ -394,6 +395,7 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
         const controller = new AbortController();
         activeTurns.set(params.sessionId, controller);
         let stateScope = null;
+        const ownershipPreviouslyHeld = sessionState?.ownsChannel?.(buzzContext.channelId) !== false;
         try {
           if ((sessionState?.enabled || steeringCapability) && channelBusyElsewhere(buzzContext.channelId, params.sessionId)) {
             throw steeringRpcError('agy channel turn is busy');
@@ -448,13 +450,17 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
               replacement.setModelCatalog?.(entry.modelCatalog);
               entry.session = session = replacement;
               entry.bound = false;
+              entry.cachedConversationBound = false;
               entry.steering = null;
               entry.needsReplacement = false;
               report(`provider session rebuilt channel=${buzzContext.channelId}; interrupted work is not replayed by the adapter`);
               emitDeliveryDiagnostic(params.sessionId, 'Previous turn interrupted; provider session rebuilt. Prior correction consumption and external effects may remain uncertain.');
             }
             if (!entry.bound) {
-              if (saved) session.setTrustedConversation?.(saved.conversationId);
+              if (saved) {
+                session.setTrustedConversation?.(saved.conversationId);
+                entry.cachedConversationBound = true;
+              }
               entry.bound = true;
             }
             await sessionState.invalidate(stateScope);
@@ -468,11 +474,30 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
           if (!publisher || typeof publisher.publish !== 'function') throw Object.assign(new Error('Buzz publisher unavailable'), { rpcCode: -32603, rpcMessage: 'Buzz publisher unavailable' });
           if (controller.signal.aborted) throw Object.assign(new Error('prompt cancelled'), { code: 'CANCELLED' });
         } catch (error) {
+          // Release only an unused lease acquired by this preflight. Keep the
+          // active reservation and pin until release completes, so another prompt
+          // cannot race ownership cleanup. Cached conversation bindings and previous
+          // providers/leases remain pinned, so a peer cannot change their association.
+          if (!ownershipPreviouslyHeld && !entry.cachedConversationBound && !entry.providerEverStarted && !entry.needsReplacement &&
+              sessionState?.ownsChannel?.(buzzContext.channelId)) {
+            try {
+              await sessionState.releaseOwnership(buzzContext.channelId);
+              // A peer may now establish an association: discard empty cached
+              // preflight state so the next attempt binds the new disk record.
+              entry.bound = false;
+              entry.steering = null;
+              session.setSteeringCoordinator?.(null);
+            }
+            catch {
+              entry.stateError = 'agy channel ownership release could not be confirmed';
+              report('unused channel ownership release could not be confirmed');
+            }
+          }
           activeTurns.delete(params.sessionId);
           settleLiveBlock(buzzContext.channelId, params.sessionId);
           // Retain the channel pin after an unconfirmed retirement: a new ACP
           // session must not bypass the failed session's recovery guard.
-          if (!entry.needsReplacement && channelSessions.get(buzzContext.channelId) === params.sessionId) {
+          if (!entry.needsReplacement && !entry.stateError && channelSessions.get(buzzContext.channelId) === params.sessionId) {
             channelSessions.delete(buzzContext.channelId);
           }
           if (stateScope) blockEntry(entry);
@@ -493,6 +518,7 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
         let providerRetired = false;
         try {
           providerStarted = true;
+          entry.providerEverStarted = true;
           const response = await session.prompt(text, (delta) => write({
             jsonrpc: JSON_RPC,
             method: 'session/update',
@@ -502,6 +528,19 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
           });
           if (typeof response !== 'string' || !response.trim()) {
             throw Object.assign(new Error('provider produced an empty response'), { rpcCode: -32603, rpcMessage: 'provider produced an empty response' });
+          }
+          let stagedConversationId = null;
+          if (stateScope && sessionState?.enabled) {
+            const conversationId = session.getConversationId?.();
+            if (!conversationId || !session.hasConfirmedConversation?.() ||
+                typeof session.retireForCheckpoint !== 'function' ||
+                await session.retireForCheckpoint() !== conversationId) {
+              throw steeringRpcError('agy provider retirement could not be confirmed before publication');
+            }
+            providerRetired = true;
+            if (controller.signal.aborted) throw Object.assign(new Error('prompt cancelled'), { code: 'CANCELLED' });
+            await sessionState.stageCheckpoint(stateScope, conversationId);
+            stagedConversationId = conversationId;
           }
           deliveryActivity('tool_call', 'Response produced', 'pending');
           let recoveryId = null;
@@ -540,41 +579,15 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
           else deliveryActivity('tool_call_update', 'Delivery uncertain', 'failed', `Delivery uncertain; recovery ${recoveryId ?? 'unavailable'}`);
           if (status === 'sent' && stateScope && sessionState?.enabled) {
             try {
-              if (steeringCapability) {
-                await ensureSteering(entry, buzzContext.channelId);
-                if (entry.steering && !providerRetired) {
-                  const steeringConversationId = session.getConversationId?.();
-                  if (typeof session.retireForCheckpoint !== 'function' ||
-                      await session.retireForCheckpoint() !== steeringConversationId) {
-                    throw steeringRpcError('agy steering provider retirement could not be confirmed');
-                  }
-                  providerRetired = true;
-                }
-              }
-              const conversationId = session.getConversationId?.();
-              if (conversationId && session.hasConfirmedConversation?.()) {
-                if (!providerRetired && (typeof session.retireForCheckpoint !== 'function' ||
-                    await session.retireForCheckpoint() !== conversationId)) {
-                  throw new Error('provider retirement could not be confirmed');
-                }
-                if (!providerRetired) {
-                  providerRetired = true;
-                }
-                if (controller.signal.aborted) throw new Error('checkpoint cancelled');
-                await sessionState.save(stateScope, conversationId);
-                // Maintenance constraint: this removal stays immediately after the save,
-                // with no await in between. `reconciliationRefusal` reads
-                // `channelsWithLiveBlock` as the in-process proof that a live turn owns the
-                // channel. A gap between the two would show the channel as free while the
-                // record on disk is already settled, or the reverse if the order flipped.
-                channelsWithLiveBlock.delete(buzzContext.channelId);
-                turnSafe = true;
-              } else {
-                blockEntry(entry);
-              }
-            } catch (error) {
-              // `save` did not run, so the record on disk stays blocked and the next
-              // turn reads it. A sticky marker here would only hide a later repair.
+              if (!providerRetired || !stagedConversationId) throw new Error('checkpoint was not staged');
+              if (controller.signal.aborted) throw new Error('checkpoint cancelled');
+              await sessionState.save(stateScope, stagedConversationId);
+              // Keep adjacent to save: there must be no await before releasing
+              // the in-process liveness guard for this completed checkpoint.
+              channelsWithLiveBlock.delete(buzzContext.channelId);
+              turnSafe = true;
+            } catch {
+              // The staged record remains blocked but retains this turn's ID.
               report('session association could not be saved');
             }
           } else if (status === 'sent' && !sessionState?.enabled) {

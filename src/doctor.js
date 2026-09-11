@@ -1,3 +1,4 @@
+import { inspectSteeringDiagnostics } from './steering-diagnostics.js';
 import { constants as fsConstants, readFileSync } from 'node:fs';
 import { access, lstat, readdir, readFile, stat } from 'node:fs/promises';
 import { spawn as nodeSpawn } from 'node:child_process';
@@ -396,6 +397,8 @@ export async function runDoctor({
     report.checks.push(check('models', report.models.status, report.models.message));
     report.mode = 'models';
   }
+  report.steering = await inspectSteeringDiagnostics(diagnosticEnv, { fsImpl: { access, lstat, readdir, readFile, stat, ...fsImpl } });
+  report.checks.push(check('steering-state', report.steering.status, report.steering.message));
   report.ok = report.checks.every(({ status }) => status !== 'fail');
   return report;
 }
@@ -429,7 +432,9 @@ export function formatDoctorReport(report) {
     `Harness: ${report.harness.status} — ${report.harness.message}`,
     ...(report.latest ? [`Latest release: ${report.latest.status} — ${report.latest.version ?? 'unknown'}`] : []),
     ...(report.models ? [`Models: ${report.models.status} — ${report.models.models.length} usable model(s)`] : []),
-    `Result: ${report.ok ? 'ready for the reported checks' : 'action required'}`
+    ...(report.steering?.configured ? [`Steering: ${report.steering.status} — ${report.steering.message}`,
+      `Steering bridges: ready=${report.steering.bridges.ready}, blocked=${report.steering.bridges.blocked}, invalid=${report.steering.bridges.invalid}, archived=${report.steering.bridges.archived}`, report.steering.guidance].filter(Boolean) : []),
+    `Result: ${report.ok ? report.steering?.status === 'warn' ? 'checks completed with steering warnings; review before recovery' : 'ready for the reported checks' : 'action required'}`
   ];
   return `${lines.join('\n')}\n`;
 }

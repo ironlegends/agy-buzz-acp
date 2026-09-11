@@ -175,3 +175,13 @@ Use `agy-buzz-doctor --harness /path/to/harness.json --json` to inspect the conf
 Use `agy-buzz-manage` to plan a local archive installation or rollback. Supply the expected SHA-256 from a trusted release reference. Changes require `--apply`; the tool does not restart agents or refresh Desktop. See [upgrades and rollback](docs/UPGRADING.md).
 
 See [recovery with official Buzz](docs/OFFICIAL_BUZZ_RECOVERY.md) for the native-lock design, forced-stop boundaries and migration requirements. Outbox recovery and conversation recovery remain separate mechanisms. Native dependencies are bundled in the release archive; do not copy only the JavaScript files when installing an extracted runtime.
+
+## Unreleased maintenance: 0.5.9
+
+The source candidate adds read-only steering diagnostics, a specific error for multi-event batches without an explicit Context reply destination, and release of a newly acquired unused channel lease when preflight fails before this ACP session has bound a conversation or started a provider. Existing ownership and unconfirmed provider retirement remain protected; no lock file is deleted.
+
+With durable state enabled, a successful provider is now retired and its confirmed conversation ID staged in the existing version-1 **blocked** record before publication. Only acknowledged delivery allows the final **ready** checkpoint. This preserves the current association if the process dies after delivery but before the ready checkpoint, including on the first turn. Failure to retire or stage prevents publication. It does not recover an identifier already lost by an older release, replay interrupted input, roll back tools, or make publication and storage transactional.
+
+Grouped prompts with a valid explicit Context destination continue to work. An ambiguous batch is still refused; 0.5.9 does not guess the last event or the channel root. Doctor reports blocked/invalid/archived steering metadata and missing recovery prerequisites without running a hook, acquiring a lock, changing permissions or disclosing record contents. Its configured-recovery flag does not prove that a live provider is stopped or a delivery is settled.
+
+Published v0.5.8 archives remain unchanged. No installation is updated by these source changes.
