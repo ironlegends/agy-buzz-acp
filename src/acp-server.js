@@ -499,6 +499,9 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
           }), (update) => {
             if (update && typeof update === 'object') emitActivity(params.sessionId, update);
           });
+          if (typeof response !== 'string' || !response.trim()) {
+            throw Object.assign(new Error('provider produced an empty response'), { rpcCode: -32603, rpcMessage: 'provider produced an empty response' });
+          }
           deliveryActivity('tool_call', 'Response produced', 'pending');
           let recoveryId = null;
           let durabilityFailed = false;
