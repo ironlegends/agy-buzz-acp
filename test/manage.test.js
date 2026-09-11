@@ -1,8 +1,10 @@
-import test from 'node:test';
+import test, { mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { gzipSync } from 'node:zlib';
-import { mkdir, mkdtemp, readFile, realpath, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, realpath, stat, writeFile } from 'node:fs/promises';
+import fsPromises from 'node:fs/promises';
+import { syncBuiltinESMExports } from 'node:module';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
@@ -84,6 +86,30 @@ async function setupHarness() {
 
 function digest(buffer) {
   return createHash('sha256').update(buffer).digest('hex');
+}
+
+async function setupRollbackPlan() {
+  const { root, oldEntry, harnessPath } = await setupHarness();
+  const original = await readFile(harnessPath);
+  const backupPath = `${harnessPath}.backup`;
+  await writeFile(backupPath, original);
+  const current = JSON.parse(original);
+  current.args[0] = join(root, 'versions', 'agy-buzz-acp-0.4.0', 'bin', 'agy-buzz-acp.js');
+  await mkdir(join(root, 'versions', 'agy-buzz-acp-0.4.0', 'bin'), { recursive: true });
+  await writeFile(current.args[0], 'installed adapter\n', 'utf8');
+  const currentBytes = Buffer.from(JSON.stringify(current));
+  await writeFile(harnessPath, currentBytes);
+  await writeFile(`${backupPath}.receipt.json`, JSON.stringify({
+    version: 1, harnessPath, backupPath, originalDigest: digest(original), installedDigest: digest(currentBytes),
+    previousEntrypoint: oldEntry, installedEntrypoint: current.args[0]
+  }));
+  const plan = await planRollback({ backup: backupPath, harness: harnessPath });
+  return { root, harnessPath, backupPath, original, currentBytes, plan };
+}
+
+async function stageDirEntries(harnessPath) {
+  const entries = await readdir(join(harnessPath, '..'));
+  return entries.filter((name) => name.startsWith('.agy-rollback-'));
 }
 
 test('plans a verified install without mutating the harness or runtime root', async () => {
@@ -273,6 +299,49 @@ test('rollback validates identity and restores exact backup bytes', async () => 
   await applyRollback(plan);
   assert.equal((await readFile(harnessPath)).equals(original), true);
   assert.equal((await stat(oldEntry)).isFile(), true);
+  assert.deepEqual(await stageDirEntries(harnessPath), []);
+});
+
+test('rollback restores the prior current harness when the final publish link fails after the claim swap', async () => {
+  const { harnessPath, currentBytes, plan } = await setupRollbackPlan();
+  const realLink = fsPromises.link.bind(fsPromises);
+  let calls = 0;
+  mock.method(fsPromises, 'link', async (existing, newPath) => {
+    calls += 1;
+    if (calls === 1) throw new Error('synthetic link failure');
+    return realLink(existing, newPath);
+  });
+  syncBuiltinESMExports();
+  try {
+    await assert.rejects(applyRollback(plan), /synthetic link failure/);
+  } finally {
+    mock.restoreAll();
+    syncBuiltinESMExports();
+  }
+  assert.equal(calls, 2);
+  assert.equal((await readFile(harnessPath)).equals(currentBytes), true);
+  assert.deepEqual(await stageDirEntries(harnessPath), []);
+});
+
+test('rollback preserves a concurrent external edit that appears during the final publish window', async () => {
+  const { root, harnessPath, plan } = await setupRollbackPlan();
+  const externalBytes = Buffer.from(harness(join(root, 'external', 'bin', 'agy-buzz-acp.js')));
+  const realLink = fsPromises.link.bind(fsPromises);
+  let calls = 0;
+  mock.method(fsPromises, 'link', async (existing, newPath) => {
+    calls += 1;
+    if (calls === 1) await writeFile(newPath, externalBytes, { flag: 'wx' });
+    return realLink(existing, newPath);
+  });
+  syncBuiltinESMExports();
+  try {
+    await assert.rejects(applyRollback(plan), /EEXIST/);
+  } finally {
+    mock.restoreAll();
+    syncBuiltinESMExports();
+  }
+  assert.equal((await readFile(harnessPath)).equals(externalBytes), true);
+  assert.deepEqual(await stageDirEntries(harnessPath), []);
 });
 
 test('rollback refuses a changed harness identity and preserves both files', async () => {
@@ -330,4 +399,25 @@ test('management CLI defaults to a read-only plan and requires apply for mutatio
   assert.equal(plan.stdout.includes('"env"'), false);
   assert.equal(plan.stdout.includes('originalBytes'), false);
   assert.equal(plan.stdout.includes('"command"'), false);
+});
+
+test('rollback preserves the claim when both publication and restoration fail', async () => {
+  const { harnessPath, currentBytes, original, backupPath, plan } = await setupRollbackPlan();
+  mock.method(fsPromises, 'link', async () => { throw new Error('synthetic link refusal'); });
+  syncBuiltinESMExports();
+  try { await assert.rejects(applyRollback(plan), /synthetic link refusal/); }
+  finally { mock.restoreAll(); syncBuiltinESMExports(); }
+  await assert.rejects(stat(harnessPath), { code: 'ENOENT' });
+  const parent = join(harnessPath, '..');
+  const claims = (await readdir(parent)).filter((name) => name.includes('.rollback-current-'));
+  assert.equal(claims.length, 1);
+  assert.deepEqual(await readFile(join(parent, claims[0])), currentBytes);
+  assert.deepEqual(await readFile(backupPath), original);
+  assert.deepEqual(await stageDirEntries(harnessPath), []);
+});
+test('rollback cleans only its stage when a prepublication callback fails', async () => {
+  const { harnessPath, currentBytes, plan } = await setupRollbackPlan();
+  await assert.rejects(applyRollback(plan, { beforePublish() { throw new Error('synthetic prepublish refusal'); } }), /synthetic prepublish refusal/);
+  assert.deepEqual(await readFile(harnessPath), currentBytes);
+  assert.deepEqual(await stageDirEntries(harnessPath), []);
 });

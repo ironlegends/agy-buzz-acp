@@ -8,6 +8,7 @@ import {
   open,
   readFile,
   rename,
+  rmdir,
   stat,
   unlink,
   writeFile
@@ -357,23 +358,32 @@ export async function applyRollback(plan, { beforePublish } = {}) {
     if (!fresh.originalBytes.equals(plan.originalBytes) || !fresh.currentBytes.equals(plan.currentBytes)) fail('configuration changed after the rollback plan; refusing a configuration conflict');
     const stage = await mkdtemp(join(dirname(plan.harness), '.agy-rollback-'));
     const staged = join(stage, 'harness.json');
-    await writeFile(staged, fresh.originalBytes, { flag: 'wx', mode: 0o600 });
-    await beforePublish?.();
-    const claim = `${plan.harness}.rollback-current-${randomUUID()}`;
-    await assertNoSymlinkAncestors(claim);
     try {
-      await rename(plan.harness, claim);
-    } catch {
-      fail('harness disappeared during rollback; refusing a configuration conflict');
+      await writeFile(staged, fresh.originalBytes, { flag: 'wx', mode: 0o600 });
+      await beforePublish?.();
+      const claim = `${plan.harness}.rollback-current-${randomUUID()}`;
+      await assertNoSymlinkAncestors(claim);
+      try {
+        await rename(plan.harness, claim);
+      } catch {
+        fail('harness disappeared during rollback; refusing a configuration conflict');
+      }
+      const claimedBytes = await readFile(claim);
+      if (!claimedBytes.equals(plan.currentBytes)) {
+        await restoreClaimIfAbsent(claim, plan.harness);
+        fail('concurrent configuration won the final rollback window; preserved its bytes in the claim file');
+      }
+      try {
+        await link(staged, plan.harness);
+      } catch (error) {
+        await restoreClaimIfAbsent(claim, plan.harness).catch(() => {});
+        throw error;
+      }
+      return { action: 'rollback', applied: true, harness: plan.harness, backup: plan.backup, receiptPath: plan.receiptPath, currentBackupPath: claim };
+    } finally {
+      await unlink(staged).catch(() => {});
+      await rmdir(stage).catch(() => {});
     }
-    const claimedBytes = await readFile(claim);
-    if (!claimedBytes.equals(plan.currentBytes)) {
-      await restoreClaimIfAbsent(claim, plan.harness);
-      fail('concurrent configuration won the final rollback window; preserved its bytes in the claim file');
-    }
-    await link(staged, plan.harness);
-    await unlink(staged).catch(() => {});
-    return { action: 'rollback', applied: true, harness: plan.harness, backup: plan.backup, receiptPath: plan.receiptPath, currentBackupPath: claim };
   });
 }
 
