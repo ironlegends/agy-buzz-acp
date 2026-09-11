@@ -165,30 +165,7 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
     return false;
   };
 
-  // Names the condition that refuses reconciliation, or null when all of them hold.
-  // A refusal has to say which door closed: a bare terminal block gives an operator
-  // no way to tell a guard doing its job from a fault.
-  //
-  // `channelBusyElsewhere` is defence in depth and is not falsifiable by the current
-  // suite. A live turn on the channel has already run `invalidate`, so it also sits in
-  // `channelsWithLiveBlock` until its `save`, and `save` is followed immediately by the
-  // removal with no injectable wait in between. It used to look falsifiable on the
-  // steering path only because that harness ran without durable state, where
-  // `channelsWithLiveBlock` is never filled — the same illusion the disabled outbox
-  // produced.
-  //
-  // It is kept because one race leaves it as the only guard. That race is reachable in
-  // principle and is not exercised here. The steering hook runs in the provider child,
-  // out of this process, and can move a bridge to `blocked` at any moment
-  // (`claimPendingSteer` calls `blockState`, src/steering.js:347 and :326). Meanwhile
-  // `inspectExistingSteering` runs before `activeTurns.set` and before the
-  // `agy channel session is already owned` refusal, and the ownership lock is held per
-  // process, not per session: `ownedChannels.has` short-circuits every later caller
-  // (src/session-state.js:90). So a second session of this adapter, prompting the same
-  // channel between the first turn's `scope` and its `channelsWithLiveBlock.add`, passes
-  // the ownership check and finds the channel absent from `channelsWithLiveBlock`. Only
-  // this condition then stops it from archiving a bridge that is still live. The
-  // ordering above is measured; the race itself is not. Found by Sonnet's delta review.
+  // Retain the liveness guard through cleanup; no recovery can race an active turn.
   const settleLiveBlock = (channelId, sessionId) => {
     if (!channelId || channelBusyElsewhere(channelId, sessionId)) return;
     channelsWithLiveBlock.delete(channelId);
@@ -315,7 +292,7 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
             mcpCapabilities: { http: false, sse: false }
           },
           _meta: { steering: { supported: steeringCapability } },
-            agentInfo: { name: 'agy-buzz-acp', version: '0.5.7' }
+            agentInfo: { name: 'agy-buzz-acp', version: '0.5.8-rc.1' }
         }));
         return;
       }
@@ -360,7 +337,7 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
         session.setModelCatalog?.(catalog);
         sessions.set(sessionId, { session, sessionId, cwd: params.cwd,
           model: requestedModel, modelCatalog: catalog, bound: false, stateError: null,
-          steering: null });
+          steering: null, systemPrompt, needsReplacement: false });
         if (id !== undefined) write(rpcResult(id, { sessionId, configOptions: modelConfigOptions(catalog, requestedModel) }));
         return;
       }
@@ -399,7 +376,7 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
         if (Object.prototype.hasOwnProperty.call(params, 'model')) throw Object.assign(new Error('model override is not supported'), { rpcCode: -32602 });
         const entry = sessions.get(params.sessionId);
         if (!entry) throw Object.assign(new Error('unknown session'), { rpcCode: -32001 });
-        const session = entry.session;
+        let session = entry.session;
         if (activeTurns.has(params.sessionId)) throw Object.assign(new Error('session turn is busy'), { rpcCode: -32002 });
         if (entry.stateError) throw Object.assign(new Error(entry.stateError), { rpcCode: -32603, rpcMessage: entry.stateError });
         const text = promptToText(params.prompt);
@@ -413,38 +390,44 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
           throw Object.assign(new Error('agy session channel scope cannot change'), { rpcCode: -32602, rpcMessage: 'agy session channel scope cannot change' });
         }
         entry.channelId ??= buzzContext.channelId;
-        if (steeringCapability) await inspectExistingSteering(entry, buzzContext.channelId, params.sessionId);
+        // Reserve before the first await, including steering inspection/recovery.
         const controller = new AbortController();
         activeTurns.set(params.sessionId, controller);
         let stateScope = null;
         try {
+          if ((sessionState?.enabled || steeringCapability) && channelBusyElsewhere(buzzContext.channelId, params.sessionId)) {
+            throw steeringRpcError('agy channel turn is busy');
+          }
           if (sessionState?.configurationError) {
             throw Object.assign(new Error(sessionState.configurationError), { rpcCode: -32602, rpcMessage: sessionState.configurationError });
           }
           if (sessionState?.enabled) {
-            if (entry.stateError) throw Object.assign(new Error(entry.stateError), { rpcCode: -32603, rpcMessage: entry.stateError });
             await sessionState.verifyIdentity(makeIdentity);
             stateScope = await sessionState.scope({ channelId: buzzContext.channelId, cwd: entry.cwd, model: entry.model });
             const existingSessionId = channelSessions.get(buzzContext.channelId);
             if (existingSessionId && existingSessionId !== params.sessionId) {
               throw Object.assign(new Error('agy channel session is already owned'), { rpcCode: -32002, rpcMessage: 'agy channel session is already owned' });
             }
-            // Maintenance constraint: `channelSessions` is never purged on success. The
-            // entry is removed only on the failure path of this turn, so a channel stays
-            // pinned to its first successful session for the life of the process. That is
-            // the intent — a second session must be refused above, not silently take the
-            // channel over — but it also means a session that ends cleanly keeps the pin.
             channelSessions.set(buzzContext.channelId, params.sessionId);
-            // Every turn re-reads the record: `load` is the guard that refuses a block
-            // left by an incomplete turn. Binding the trusted conversation stays a
-            // one-off, because the provider refuses it once a child is running.
+          }
+          if (entry.needsReplacement) {
+            if (!stateScope) throw steeringRpcError('agy recovery requires durable session state');
+            const refusal = await reconciliationRefusal(buzzContext.channelId, params.sessionId);
+            if (refusal) {
+              report(`session recovery refused channel=${buzzContext.channelId} reason=${refusal}`);
+              throw Object.assign(new Error('agy session state is blocked after an incomplete turn'), { rpcMessage: 'agy session state is blocked after an incomplete turn' });
+            }
+            if (typeof session.retireForRecovery !== 'function' || await session.retireForRecovery() !== true) {
+              throw steeringRpcError('agy provider retirement could not be confirmed');
+            }
+          }
+          // A failed provider must be confirmed closed BEFORE disk reconciliation.
+          if (steeringCapability) await inspectExistingSteering(entry, buzzContext.channelId, params.sessionId);
+          if (sessionState?.enabled) {
             let saved;
             try {
               saved = await sessionState.load(stateScope);
             } catch (error) {
-              // A record left blocked by a turn that never reached `save` is repaired
-              // here instead of waiting for an operator. The guard stays closed while
-              // another turn of this adapter is running on the channel.
               if (error?.code !== 'AGY_SESSION_STATE_BLOCKED') throw error;
               const refusal = await reconciliationRefusal(buzzContext.channelId, params.sessionId);
               if (refusal) {
@@ -455,6 +438,20 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
               if (!outcome.reconciled) throw error;
               report(`session record reconciled channel=${buzzContext.channelId} conversation=${outcome.conversationId ?? 'none'}`);
               saved = await sessionState.load(stateScope);
+            }
+            if (entry.needsReplacement) {
+              // Do not reset contextLost on the failed object or reuse its buffers.
+              // Rebind only the association validated above, never an unconfirmed ID.
+              const replacement = makeSession({ sessionId: params.sessionId, cwd: entry.cwd,
+                model: entry.model, systemPrompt: entry.systemPrompt });
+              if (!replacement || replacement === session) throw steeringRpcError('agy replacement session is unavailable');
+              replacement.setModelCatalog?.(entry.modelCatalog);
+              entry.session = session = replacement;
+              entry.bound = false;
+              entry.steering = null;
+              entry.needsReplacement = false;
+              report(`provider session rebuilt channel=${buzzContext.channelId}; interrupted work is not replayed by the adapter`);
+              emitDeliveryDiagnostic(params.sessionId, 'Previous turn interrupted; provider session rebuilt. Prior correction consumption and external effects may remain uncertain.');
             }
             if (!entry.bound) {
               if (saved) session.setTrustedConversation?.(saved.conversationId);
@@ -605,7 +602,10 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
             write(rpcResult(id, { stopReason: 'end_turn', publication: delivery }));
           }
         } finally {
-          if (providerStarted && !turnSafe) blockEntry(entry);
+          if (providerStarted && !turnSafe) {
+            blockEntry(entry);
+            entry.needsReplacement = true;
+          }
           activeTurns.delete(params.sessionId);
           settleLiveBlock(buzzContext.channelId, params.sessionId);
         }

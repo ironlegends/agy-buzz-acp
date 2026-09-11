@@ -57,7 +57,7 @@ async function durableHarness({ outboxFactory } = {}) {
       setTrustedConversation(value) { trusted.push(value); },
       getConversationId: () => 'conversation-1',
       hasConfirmedConversation: () => true,
-      retireForCheckpoint: async () => 'conversation-1',
+      retireForCheckpoint: async () => 'conversation-1', retireForRecovery: async () => true,
       cancel() {}, close() {}
     }),
     publisherFactory: () => ({ publish: async () => ({ status: 'sent', eventId: 'cd'.repeat(32) }) })
@@ -162,7 +162,7 @@ async function steeringHarness({ durableState = true } = {}) {
         setSteeringCoordinator() {}, getConversationId: () => 'conversation-1',
         hasConfirmedConversation: () => true,
         setTrustedConversation() {},
-        retireForCheckpoint: async () => 'conversation-1',
+        retireForCheckpoint: async () => 'conversation-1', retireForRecovery: async () => true,
         cancel() {}, close() {}
       }),
       sessionStateFactory: () => (durableState ? state : null),
@@ -225,7 +225,7 @@ test('a bridge left blocked by a dead turn is archived and rebuilt on the next p
   } finally { await dispose(); }
 });
 
-test('a steering timeout is reconciled by the same process after provider retirement', async () => {
+test('server rebuilds an explicitly retired mock session (real watchdog covered separately)', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'agy-reconcile-steer-timeout-'));
   const state = new SessionState({ dir: await mkdtemp(join(tmpdir(), 'agy-steer-timeout-state-')), owner, relay });
   const outbox = new DeliveryOutbox({ dir: await mkdtemp(join(tmpdir(), 'agy-steer-timeout-outbox-')), owner });
@@ -249,7 +249,7 @@ test('a steering timeout is reconciled by the same process after provider retire
         },
         setSteeringCoordinator(value) { steering = value; },
         getConversationId: () => 'conversation-1', hasConfirmedConversation: () => true,
-        setTrustedConversation() {}, retireForCheckpoint: async () => 'conversation-1', cancel() {}, close() {}
+        setTrustedConversation() {}, retireForCheckpoint: async () => 'conversation-1', retireForRecovery: async () => true, cancel() {}, close() {}
       }),
       sessionStateFactory: () => state, outboxFactory: () => outbox, identityFactory: async () => owner
     }),
@@ -295,7 +295,7 @@ test('a blocked bridge is not reconciled while another turn of this adapter hold
     await second.settled;
     const refused = second.read();
     assert.ok(refused?.error, `expected refusal, got ${JSON.stringify(refused)}`);
-    assert.match(refused.error.message, /steering is durably blocked/i);
+    assert.match(refused.error.message, /channel turn is busy/i);
     assert.deepEqual(await archives(), [], 'a bridge held by a live turn must not be archived');
 
     release();

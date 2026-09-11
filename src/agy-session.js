@@ -121,6 +121,7 @@ export class AgySession {
     this.steeringTimeoutMs = steeringTimeoutMs;
     this.child = null;
     this.pending = null;
+    this.lastPending = null;
     this.buffer = '';
     this.contextLost = false;
     this.conversationEstablished = false;
@@ -161,6 +162,7 @@ export class AgySession {
         steerOperations: new Set(), steeringTimers: new Map(), steeringClaimPollers: new Map(), observationInFlight: false, deferredUserInput: null, deferredEvents: [], pendingResult: null, steeringFailure: null,
         providerInitSeen: false, initialUserInputExpected: false, initialUserInputSeen: false };
       this.pending = pending;
+      this.lastPending = pending;
       void this.startPending(pending);
     });
   }
@@ -314,6 +316,27 @@ export class AgySession {
     }
     this.resumeEligible = true;
     return this.conversationId;
+  }
+
+  // Proves only local quiescence, never that prior external effects did not occur.
+  // The server may then replace this object under its durable recovery guards.
+  async retireForRecovery() {
+    if (this.pending || this.steeringBindingInFlight ||
+        this.lastPending?.steerOperations?.size || this.lastPending?.observationInFlight) {
+      throw wrapperError('agy recovery requires all previous operations to settle');
+    }
+    const child = this.child;
+    const closePromise = this.lastChildClosePromise;
+    if (child && !child._agyStopRequested) {
+      child._agyStopRequested = true;
+      stopChild(child);
+    }
+    // Error/cancel paths can clear `child` before close. Never treat that as proof
+    // of exit: even that case must await the recorded close promise, with a bound.
+    if (closePromise) await this.waitForCloseWithin(closePromise, this.retireTimeoutMs);
+    else if (child) throw wrapperError('agy provider retirement could not be confirmed');
+    this.close();
+    return true;
   }
 
   waitForCloseWithin(closePromise, timeoutMs) {
