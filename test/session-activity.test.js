@@ -92,6 +92,79 @@ test('finishes an active tool as unconfirmed before completing the provider', as
   assert.equal(activity.at(-1).status, 'completed');
 });
 
+test('marks an active tool unconfirmed and fails closed without replay when provider closes', async () => {
+  let childInstances = 0;
+  let providerPromptWrites = 0;
+  let syntheticToolStarts = 0;
+  const activity = [];
+  const textDeltas = [];
+  let currentChild = null;
+
+  const session = new AgySession({
+    spawnFn: () => {
+      childInstances += 1;
+      currentChild = fakeChild();
+      const origWrite = currentChild.stdin.write;
+      currentChild.stdin.write = (value) => {
+        if (typeof value === 'string' && value.includes('"user"')) {
+          providerPromptWrites += 1;
+        }
+        return origWrite(value);
+      };
+      return currentChild;
+    }
+  });
+
+  const pending = session.prompt(
+    'execute tool task',
+    (delta) => textDeltas.push(delta),
+    (update) => activity.push(update)
+  );
+
+  assert.equal(childInstances, 1);
+  assert.equal(providerPromptWrites, 1);
+
+  emit(currentChild, { event: 'init', conversation_id: 'tool-cut-123' });
+  emit(currentChild, { event: 'step_update', step_update: {
+    conversation_id: 'tool-cut-123', step_index: 0, step_type: 'user_input', state: 'DONE'
+  } });
+  syntheticToolStarts += 1;
+  emit(currentChild, {
+    event: 'step_update',
+    step_update: {
+      conversation_id: 'tool-cut-123',
+      step_index: 3,
+      state: 'ACTIVE',
+      step_type: 'tool',
+      tool_name: 'view_file'
+    }
+  });
+
+  assert.equal(activity.some((update) => update.toolName === 'view_file' && update.status === 'in_progress'), true);
+
+  currentChild.emit('close');
+
+  await assert.rejects(pending, /agy exited before completing the prompt/i);
+
+  const toolTerminal = activity.find((update) => update.toolName === 'view_file' && update.status === 'failed');
+  assert.ok(toolTerminal, 'active tool must receive a failed terminal update');
+  assert.equal(toolTerminal.content[0].content.text, 'Final state unconfirmed');
+
+  const providerTerminal = activity.find((update) => update.toolName === 'agy_provider' && update.status === 'failed');
+  assert.ok(providerTerminal, 'provider activity must be marked failed');
+
+  emit(currentChild, { event: 'step_update', step_update: {
+    conversation_id: 'tool-cut-123', step_index: 4, step_type: 'agent_response', text_delta: 'late response'
+  } });
+  assert.equal(textDeltas.length, 0);
+
+  await assert.rejects(session.prompt('replay must fail', () => {}), /context lost|resume/i);
+
+  assert.equal(childInstances, 1, 'child instance counter must remain 1');
+  assert.equal(providerPromptWrites, 1, 'provider prompt counter must remain 1');
+  assert.equal(syntheticToolStarts, 1, 'synthetic tool starts counter must remain 1');
+});
+
 test('uses disjoint activity IDs for separate session instances', async () => {
   const firstChild = fakeChild();
   const secondChild = fakeChild();
@@ -124,7 +197,7 @@ test('treats a legacy step without step_type as an agent response only', async (
   assert.equal(activity.length, 2);
 });
 
-test('resumes only after a successful turn and matching init, before sending the next prompt', async () => {
+test('resumes only after a successful turn, then rejects a repeated init', async () => {
   const children = [];
   const activity = [];
   const invocations = [];
@@ -149,11 +222,11 @@ test('resumes only after a successful turn and matching init, before sending the
   assert.equal(children[1].stdin.writes.length, 0);
   emit(children[1], { event: 'init', conversation_id: 'resume-123' });
   assert.equal(children[1].stdin.writes.length, 1);
+  const repeatedInit = assert.rejects(second, /repeated init/i);
   emit(children[1], { event: 'init', conversation_id: 'resume-123' });
+  await repeatedInit;
   assert.equal(children[1].stdin.writes.length, 1);
   assert.match(children[1].stdin.writes[0], /second"/);
-  emit(children[1], { event: 'result', result: { conversation_id: 'resume-123', status: 'SUCCESS', response: 'second' } });
-  assert.equal(await second, 'second');
   assert.notEqual(activity[0].toolCallId, activity[2].toolCallId);
 });
 

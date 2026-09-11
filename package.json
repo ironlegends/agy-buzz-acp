@@ -1,27 +1,33 @@
 {
   "name": "agy-buzz-acp",
-  "version": "0.4.1",
+  "version": "0.5.8",
   "description": "Minimal ACP stdio adapter for the official Antigravity CLI.",
   "type": "module",
   "bin": {
     "agy-buzz-acp": "bin/agy-buzz-acp.js",
     "agy-buzz-recover": "bin/agy-buzz-recover.js",
     "agy-buzz-doctor": "bin/agy-buzz-doctor.js",
-    "agy-buzz-manage": "bin/agy-buzz-manage.js"
+    "agy-buzz-manage": "bin/agy-buzz-manage.js",
+    "agy-buzz-steer-hook": "bin/agy-buzz-steer-hook.js"
   },
   "files": [
     "bin/agy-buzz-acp.js",
     "bin/agy-buzz-recover.js",
     "bin/agy-buzz-doctor.js",
+    "bin/agy-buzz-steer-hook.js",
     "src/acp-server.js",
     "src/agy-session.js",
     "src/prompt.js",
     "src/buzz-context.js",
     "src/buzz-publisher.js",
     "src/delivery/outbox.js",
+    "src/native-lock.js",
     "src/delivery/identity.js",
     "src/doctor.js",
-    "docs",
+    "docs/COMPATIBILITY.md",
+    "docs/DIAGNOSTICS.md",
+    "docs/OFFICIAL_BUZZ_RECOVERY.md",
+    "docs/UPGRADING.md",
     "examples",
     "README.md",
     "src/session-state.js",
@@ -32,11 +38,12 @@
     "src/setup.js",
     "bin/agy-buzz-manage.js",
     "src/manage.js",
-    "src/status.js"
+    "src/status.js",
+    "src/steering.js"
   ],
   "scripts": {
-    "test": "node --test",
-    "check": "node --test && npm pack --dry-run"
+    "test": "node --import ./scripts/environment-support.js --test",
+    "check": "npm test && npm pack --dry-run"
   },
   "engines": {
     "node": ">=20"
@@ -48,5 +55,16 @@
   },
   "bugs": {
     "url": "https://github.com/ironlegends/agy-buzz-acp/issues"
-  }
+  },
+  "dependencies": {
+    "fs-native-extensions": "1.5.1"
+  },
+  "bundledDependencies": [
+    "fs-native-extensions",
+    "require-addon",
+    "bare-addon-resolve",
+    "bare-module-resolve",
+    "bare-semver",
+    "which-runtime"
+  ]
 }

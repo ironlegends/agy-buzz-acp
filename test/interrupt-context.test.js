@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { PassThrough } from 'node:stream';
 import { parseBuzzContext } from '../src/buzz-context.js';
 import { createAcpServer } from '../src/acp-server.js';
+import { isolatedServerOptions } from '../scripts/environment-support.js';
 
 const channelId = '11111111-1111-4111-8111-111111111111';
 const replyTo = 'a'.repeat(64);
@@ -52,8 +53,10 @@ test('publishes a resumed turn once to the current context through ACP', async (
   let result = '';
   output.on('data', (chunk) => { result += chunk; });
   const server = createAcpServer({ input: new PassThrough(), output, diagnostics: new PassThrough(),
-    sessionFactory: () => ({ prompt: async () => { calls += 1; return 'Resumed'; } }),
-    publisherFactory: () => ({ publish: async (message) => { publications.push(message); } }),
+    ...isolatedServerOptions({
+      sessionFactory: () => ({ prompt: async () => { calls += 1; return 'Resumed'; } }),
+      publisherFactory: () => ({ publish: async (message) => { publications.push(message); } })
+    })
   });
   await server.handle({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: 1 } });
   await server.handle({ jsonrpc: '2.0', id: 2, method: 'session/new', params: { cwd: process.cwd() } });

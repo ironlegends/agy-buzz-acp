@@ -1,7 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtemp, mkdir, readdir, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { PassThrough, Writable } from 'node:stream';
 import { createAcpServer } from '../src/acp-server.js';
+import { isolatedServerOptions, scrubRuntimeEnvironment } from '../scripts/environment-support.js';
 
 const channelId = '123e4567-e89b-12d3-a456-426614174000';
 const replyTo = 'f188a24b35cb6f2cc4cf4144f92eb01d25450441ef2afe7cea6075c4833af14f';
@@ -22,16 +26,14 @@ function makeOutput(messages) {
   });
 }
 
-async function makeApp({ sessionFactory, publisherFactory, outboxFactory } = {}) {
+async function makeApp({ sessionFactory, publisherFactory, outboxFactory, identityFactory, steeringFactory } = {}) {
   const messages = [];
   const input = new PassThrough();
   const app = createAcpServer({
     input,
     output: makeOutput(messages),
     diagnostics: new Writable({ write(_chunk, _encoding, callback) { callback(); } }),
-    sessionFactory,
-    publisherFactory,
-    outboxFactory
+    ...isolatedServerOptions({ sessionFactory, publisherFactory, outboxFactory, identityFactory, steeringFactory })
   });
   await app.handle({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: 1 } });
   await app.handle({ jsonrpc: '2.0', id: 2, method: 'session/new', params: { cwd: process.cwd() } });
@@ -226,4 +228,141 @@ test('marks cancelled publication uncertain and emits its recovery id', async ()
   const response = app.messages.find((message) => message.id === 3);
   assert.equal(response.result.stopReason, 'cancelled');
   assert.equal(response.result.publication.status, 'uncertain');
+});
+
+test('keeps non-persistent helper roots isolated from inherited runtime configuration', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agy-test-env-inheritance-'));
+  const sessionRoot = join(root, 'session-root');
+  const steeringRoot = join(root, 'steering-root');
+  await mkdir(sessionRoot);
+  await mkdir(steeringRoot);
+  await writeFile(join(sessionRoot, 'SENTINEL.txt'), 'synthetic sentinel\n', 'utf8');
+  await writeFile(join(steeringRoot, 'SENTINEL.txt'), 'synthetic steering sentinel\n', 'utf8');
+  const before = { session: await readdir(sessionRoot), steering: await readdir(steeringRoot) };
+  const owner = 'ab'.repeat(32);
+  const inherited = {
+    AGY_SESSION_DIR: sessionRoot,
+    AGY_SESSION_OWNER: owner,
+    BUZZ_RELAY_URL: 'wss://relay.synthetic.invalid/socket',
+    AGY_STEER_ROOT_DIR: steeringRoot,
+    AGY_STEER_OWNER: owner,
+    AGY_STEER_HOOK_CONFIGURED: '1',
+    AGY_STEER_INJECTOR_EXCLUSIVE: '1'
+  };
+  Object.assign(process.env, inherited);
+  let promptCalls = 0;
+  let publisherCalls = 0;
+  let steeringFactoryCalls = 0;
+  const app = await makeApp({
+    sessionFactory: () => ({
+      prompt: async () => { promptCalls += 1; return 'synthetic answer'; },
+      getConversationId: () => 'conversation-synthetic',
+      hasConfirmedConversation: () => true,
+      retireForCheckpoint: async () => 'conversation-synthetic',
+      cancel() {},
+      close() {}
+    }),
+    publisherFactory: () => ({
+      publish: async () => { publisherCalls += 1; return { status: 'sent', eventId: 'cd'.repeat(32) }; }
+    }),
+    outboxFactory: () => ({ enabled: false, begin: async () => null, update: async () => null }),
+    identityFactory: async () => owner,
+    steeringFactory: async (options) => {
+      steeringFactoryCalls += 1;
+      assert.equal(options.channelId, channelId);
+      return {
+        enabled: true,
+        enqueue: async () => ({ outcome: 'injected' }),
+        observeUserInput: async () => ({ outcome: 'injected' }),
+        snapshot: async () => ({ status: 'injected', guardBlocked: false, activeSteerId: null, queue: [] }),
+        block: async () => true
+      };
+    }
+  });
+
+  let after;
+  try {
+    await app.app.handle({
+      jsonrpc: '2.0', id: 3, method: 'session/prompt',
+      params: { sessionId: app.sessionId, prompt: contextPrompt() }
+    });
+    after = { session: await readdir(sessionRoot), steering: await readdir(steeringRoot) };
+  } finally {
+    await app.app.close();
+    for (const name of Object.keys(inherited)) delete process.env[name];
+    await rm(root, { recursive: true, force: true });
+  }
+
+  assert.equal(promptCalls, 1, 'the fake provider should handle the turn');
+  assert.equal(publisherCalls, 1, 'the fake publisher should handle the turn');
+  assert.equal(steeringFactoryCalls, 1, 'the synthetic steering factory must remain enabled and be injected');
+  assert.deepEqual(after, before,
+    'non-persistent helper must not write inherited durable session or steering roots');
+});
+
+test('disables inherited steering when no synthetic factory is provided', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agy-test-env-inheritance-no-steering-'));
+  const sessionRoot = join(root, 'session-root');
+  const steeringRoot = join(root, 'steering-root');
+  await mkdir(sessionRoot);
+  await mkdir(steeringRoot);
+  await writeFile(join(sessionRoot, 'SENTINEL.txt'), 'synthetic sentinel\n', 'utf8');
+  await writeFile(join(steeringRoot, 'SENTINEL.txt'), 'synthetic steering sentinel\n', 'utf8');
+  const before = { session: await readdir(sessionRoot), steering: await readdir(steeringRoot) };
+  const owner = 'cd'.repeat(32);
+  const inherited = {
+    AGY_SESSION_DIR: sessionRoot,
+    AGY_SESSION_OWNER: owner,
+    BUZZ_RELAY_URL: 'wss://relay.synthetic.invalid/socket',
+    AGY_STEER_ROOT_DIR: steeringRoot,
+    AGY_STEER_OWNER: owner,
+    AGY_STEER_HOOK_CONFIGURED: '1',
+    AGY_STEER_INJECTOR_EXCLUSIVE: '1'
+  };
+  Object.assign(process.env, inherited);
+  const app = await makeApp({
+    sessionFactory: () => ({
+      prompt: async () => 'synthetic answer',
+      getConversationId: () => 'conversation-synthetic',
+      hasConfirmedConversation: () => true,
+      retireForCheckpoint: async () => 'conversation-synthetic',
+      cancel() {},
+      close() {}
+    }),
+    publisherFactory: () => ({
+      publish: async () => ({ status: 'sent', eventId: 'ef'.repeat(32) })
+    }),
+    outboxFactory: () => ({ enabled: false, begin: async () => null, update: async () => null }),
+    identityFactory: async () => owner
+  });
+
+  let after;
+  try {
+    await app.app.handle({
+      jsonrpc: '2.0', id: 3, method: 'session/prompt',
+      params: { sessionId: app.sessionId, prompt: contextPrompt() }
+    });
+    after = { session: await readdir(sessionRoot), steering: await readdir(steeringRoot) };
+  } finally {
+    await app.app.close();
+    for (const name of Object.keys(inherited)) delete process.env[name];
+    await rm(root, { recursive: true, force: true });
+  }
+
+  assert.deepEqual(after, before,
+    'without a synthetic factory, inherited steering must remain disabled and write nothing');
+});
+
+test('scrubs AGY and BUZZ runtime variables case-insensitively', () => {
+  const env = {
+    AGY_SESSION_DIR: 'synthetic-session',
+    agy_session_owner: 'synthetic-owner',
+    BuZz_Relay_Url: 'wss://relay.synthetic.invalid/socket',
+    Path: 'system-path',
+    TEMP: 'system-temp'
+  };
+
+  scrubRuntimeEnvironment(env);
+
+  assert.deepEqual(env, { Path: 'system-path', TEMP: 'system-temp' });
 });

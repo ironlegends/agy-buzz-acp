@@ -364,7 +364,7 @@ test('doctor reports a harness package version and keeps running version unknown
   });
 
   assert.equal(report.harness.status, 'pass');
-  assert.match(report.harness.adapter.version, /^\d+\.\d+\.\d+$/);
+  assert.match(report.harness.adapter.version, /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/);
   assert.equal(report.harness.adapter.runningVersion, null);
   assert.equal(report.harness.paths.adapterPath, adapterPath);
   assert.equal(JSON.stringify(report).includes('secret'), false);

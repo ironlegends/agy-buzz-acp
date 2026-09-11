@@ -12,6 +12,7 @@ import { createAcpServer } from '../src/acp-server.js';
 import { PassThrough } from 'node:stream';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { isolatedChildEnvironment, isolatedServerOptions } from '../scripts/environment-support.js';
 
 const execFileAsync = promisify(execFile);
 const root = fileURLToPath(new URL('..', import.meta.url));
@@ -296,9 +297,9 @@ test('recovery CLI verifies the current Buzz identity before retrying stored del
     const outbox = new DeliveryOutbox({ dir, owner, idFn: () => 'cli-test' });
     await outbox.begin({ channelId, replyTo, content: 'operator response' });
     await outbox.update('cli-test', { status: 'failed-before-start' });
-    const env = { ...process.env, AGY_OUTBOX_DIR: dir, AGY_OUTBOX_OWNER: owner,
+    const env = isolatedChildEnvironment({ AGY_OUTBOX_DIR: dir, AGY_OUTBOX_OWNER: owner,
       BUZZ_CLI_COMMAND: process.execPath, BUZZ_FAKE_SCRIPT: fakeBuzz, BUZZ_SELF_PUBKEY: owner,
-      BUZZ_CALLS_FILE: join(dir, 'calls.txt') };
+      BUZZ_CALLS_FILE: join(dir, 'calls.txt') });
     const cli = join(root, 'bin', 'agy-buzz-recover.js');
     const listed = await execFileAsync(process.execPath, [cli, 'list'], { env });
     assert.match(listed.stdout, /cli-test/);
@@ -325,9 +326,9 @@ async function memoryAcp({ publisherFactory, outboxFactory, sessionFactory, iden
     for (const line of buffer.split('\n').slice(0, -1)) if (line.trim()) messages.push(JSON.parse(line));
     buffer = buffer.slice(buffer.lastIndexOf('\n') + 1);
   });
-  const server = createAcpServer({ input: new PassThrough(), output, diagnostics: new PassThrough(),
-    sessionFactory: sessionFactory ?? (() => ({ prompt: async () => 'completed response', cancel: () => {} })),
-    publisherFactory, outboxFactory, identityFactory
+  const server = createAcpServer({
+    input: new PassThrough(), output, diagnostics: new PassThrough(),
+    ...isolatedServerOptions({ publisherFactory, outboxFactory, sessionFactory, identityFactory })
   });
   await server.handle({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: 1 } });
   await server.handle({ jsonrpc: '2.0', id: 2, method: 'session/new', params: { cwd: process.cwd() } });
@@ -416,6 +417,86 @@ test('marks a publication uncertain when cancellation interrupts the publisher',
     assert.equal(response.result.stopReason, 'cancelled');
     assert.equal(response.result.publication.status, 'uncertain');
     assert.equal((await outbox.get('server-cancel')).status, 'uncertain');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('classifies a started publisher crash across the ACP boundary, persists uncertain outbox, and forbids automatic retry', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'agy-acp-outbox-cut-'));
+  try {
+    let publishAttempts = 0;
+    let ambiguousEffects = 0;
+    let providerPrompts = 0;
+    const owner = '1'.repeat(64);
+    const outbox = new DeliveryOutbox({ dir, owner, idFn: () => 'cut-recovery-1' });
+
+    const publisher = new BuzzPublisher({
+      spawnFn: (_command, args) => {
+        publishAttempts += 1;
+        const child = fakeChild();
+        child.spawnArgs = args;
+        const origEnd = child.stdin.end;
+        child.stdin.end = () => {
+          origEnd();
+          ambiguousEffects += 1;
+          setImmediate(() => {
+            child.emit('spawn');
+            child.emit('close', 1);
+          });
+        };
+        return child;
+      }
+    });
+
+    const app = await memoryAcp({
+      publisherFactory: () => publisher,
+      outboxFactory: () => outbox,
+      sessionFactory: () => ({
+        prompt: async () => {
+          providerPrompts += 1;
+          return 'completed response text';
+        },
+        cancel: () => {}
+      }),
+      identityFactory: async () => owner
+    });
+
+    const prompt = [block('[Base]'), block(`[Context]\nChannel: coordination (#${channelId})\nThread root: ${replyTo}`)];
+    await app.server.handle({ jsonrpc: '2.0', id: 3, method: 'session/prompt', params: { sessionId: app.sessionId, prompt } });
+
+    const response = app.messages.find((message) => message.id === 3);
+    assert.ok(response, 'must produce response for prompt');
+    assert.equal(response.result.stopReason, 'end_turn');
+    assert.equal(response.result.publication.status, 'uncertain');
+    assert.equal(response.result.publication.recoveryId, 'cut-recovery-1');
+
+    const deliveryActivity = app.messages.find(
+      (m) => m.params?.update?.sessionUpdate === 'tool_call_update' &&
+             m.params.update.title === 'Delivery uncertain' &&
+             m.params.update.status === 'failed'
+    );
+    assert.ok(deliveryActivity, 'delivery activity must be terminal and uncertain');
+    assert.match(deliveryActivity.params.update.content?.[0]?.content?.text ?? '', /Delivery uncertain/);
+
+    const storedRecord = await outbox.get('cut-recovery-1');
+    assert.ok(storedRecord, 'outbox record must exist');
+    assert.equal(storedRecord.status, 'uncertain');
+
+    assert.equal(publishAttempts, 1, 'publish attempts must remain 1');
+    assert.equal(ambiguousEffects, 1, 'ambiguous effects must remain 1');
+    assert.equal(providerPrompts, 1, 'provider prompt must not rerun');
+
+    const readbackList = await outbox.list();
+    assert.equal(readbackList.length, 1);
+    assert.equal(readbackList[0].status, 'uncertain');
+    assert.equal(publishAttempts, 1);
+    assert.equal(ambiguousEffects, 1);
+
+    const retryResult = await app.server.retryDelivery('cut-recovery-1', { identity: owner });
+    assert.equal(retryResult.status, 'blocked');
+    assert.equal(publishAttempts, 1, 'explicit retry must not invoke publisher on uncertain record');
+    assert.equal(providerPrompts, 1, 'provider must not be rerun');
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

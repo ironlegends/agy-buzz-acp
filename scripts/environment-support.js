@@ -1,6 +1,18 @@
+import { realpathSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+
+// Tests create private state under the system temp directory. macOS exposes
+// /var as a symlink; choose its canonical target without weakening runtime guards.
+const canonicalTemp = realpathSync(tmpdir());
+process.env.TMPDIR = canonicalTemp;
+process.env.TEMP = canonicalTemp;
+process.env.TMP = canonicalTemp;
+
 const PASSTHROUGH_ENVIRONMENT = [
   'PATH', 'PATHEXT', 'SystemRoot', 'WINDIR', 'ComSpec',
-  'HOME', 'USERPROFILE', 'TEMP', 'TMP'
+  'HOME', 'USERPROFILE', 'TEMP', 'TMP',
+  'SystemDrive', 'ProgramFiles', 'ProgramFiles(x86)', 'ProgramW6432',
+  'ProgramData', 'APPDATA', 'LOCALAPPDATA', 'PSModulePath', 'USERNAME', 'USERDOMAIN'
 ];
 const RUNTIME_PREFIXES = ['AGY_', 'BUZZ_'];
 

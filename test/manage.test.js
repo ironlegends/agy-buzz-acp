@@ -51,6 +51,16 @@ function validArchive(extra = []) {
   ]);
 }
 
+function bundledArchive(extra = [], bundledDependencies = ['fs-native-extensions']) {
+  const manifest = JSON.stringify({ name: 'agy-buzz-acp', version: '0.4.0', files: ['bin', 'src', 'docs'], bundledDependencies });
+  return archive([
+    { name: 'package/package.json', content: manifest },
+    { name: 'package/bin/agy-buzz-acp.js', content: '#!/usr/bin/env node\n' },
+    { name: 'package/src/manage.js', content: 'export {};\n' },
+    ...extra
+  ]);
+}
+
 function harness(entrypoint, overrides = {}) {
   return JSON.stringify({
     id: 'keep-id',
@@ -92,6 +102,34 @@ test('plans a verified install without mutating the harness or runtime root', as
   assert.deepEqual(plan.harness.after.env, { AGY_COMMAND: 'agy', BUZZ_CLI_COMMAND: 'buzz' });
   assert.equal((await readFile(harnessPath)).equals(before), true);
   await assert.rejects(stat(join(root, 'versions')), /ENOENT/);
+});
+
+test('accepts files belonging to an explicitly bundled dependency', async () => {
+  const { root, harnessPath } = await setupHarness();
+  const tgz = bundledArchive([
+    { name: 'package/node_modules/fs-native-extensions/LICENSE', content: 'Apache-2.0\n' },
+    { name: 'package/node_modules/fs-native-extensions/prebuilds/win32-x64/fs-native-extensions.node', content: 'native\n' }
+  ]);
+  const archivePath = join(root, 'bundled.tgz');
+  await writeFile(archivePath, tgz);
+  const plan = await planInstall({ archive: archivePath, sha256: digest(tgz), root, harness: harnessPath });
+  assert.ok(plan.package.files.includes('node_modules/fs-native-extensions/LICENSE'));
+});
+
+test('rejects a package file under node_modules when that package is not explicitly bundled', async () => {
+  const { root, harnessPath } = await setupHarness();
+  const tgz = bundledArchive([{ name: 'package/node_modules/require-addon/index.js', content: 'export {};\n' }]);
+  const archivePath = join(root, 'undeclared-bundle.tgz');
+  await writeFile(archivePath, tgz);
+  await assert.rejects(planInstall({ archive: archivePath, sha256: digest(tgz), root, harness: harnessPath }), /bundled|node_modules|listed/i);
+});
+
+test('rejects traversal inside a bundled dependency path', async () => {
+  const { root, harnessPath } = await setupHarness();
+  const tgz = bundledArchive([{ name: 'package/node_modules/fs-native-extensions/../../outside.js', content: 'escape' }]);
+  const archivePath = join(root, 'bundled-traversal.tgz');
+  await writeFile(archivePath, tgz);
+  await assert.rejects(planInstall({ archive: archivePath, sha256: digest(tgz), root, harness: harnessPath }), /path|traversal/i);
 });
 
 test('rejects an archive whose digest does not match before parsing or extraction', async () => {

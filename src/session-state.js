@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { chmod, mkdir, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { acquireNativeLock } from './native-lock.js';
 
 const OWNER_RE = /^[0-9a-f]{64}$/i;
 const CHANNEL_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -73,7 +74,7 @@ export class SessionState {
       (!this.dir || !this.owner || !this.relay)
       ? 'AGY_SESSION_DIR, AGY_SESSION_OWNER (64 hex characters), and AGY_RELAY_URL are all required'
       : null;
-    this.ownedChannels = new Set();
+    this.ownedChannels = new Map();
   }
 
   get enabled() {
@@ -87,22 +88,26 @@ export class SessionState {
     if (!CHANNEL_RE.test(channelId) && channelId !== 'adapter') throw stateError('agy session state scope is invalid');
     const lockPath = join(this.dir, `.${scopeKey(channelId)}.lock`);
     if (this.ownedChannels.has(channelId)) return true;
+    let lock;
     try {
-      await mkdir(lockPath, { recursive: false, mode: 0o700 });
-      await writeFile(join(lockPath, 'owner'), `${process.pid}\n`, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
-      this.ownedChannels.add(channelId);
+      lock = await acquireNativeLock(lockPath);
+      this.ownedChannels.set(channelId, lock);
       return true;
     } catch (error) {
-      if (error?.code === 'EEXIST') throw stateError('agy session state is owned by another adapter', 'AGY_SESSION_STATE_BUSY');
+      if (error?.code === 'AGY_NATIVE_LOCK_BUSY') throw stateError('agy session state is owned by another adapter', 'AGY_SESSION_STATE_BUSY');
+      if (error?.code === 'AGY_NATIVE_LOCK_LEGACY') throw stateError('agy legacy session state lock is unsupported', 'AGY_SESSION_STATE_LEGACY_LOCK');
       throw stateError('agy session state ownership could not be established');
     }
   }
 
   async release() {
-    for (const channelId of this.ownedChannels) {
-      await rm(join(this.dir, `.${scopeKey(channelId)}.lock`), { recursive: true, force: true });
+    let failure;
+    for (const lock of this.ownedChannels.values()) {
+      try { await lock.release(); }
+      catch (error) { failure ??= error; }
     }
     this.ownedChannels.clear();
+    if (failure) throw failure;
   }
 
   async scope({ channelId, cwd, model }) {
@@ -174,6 +179,33 @@ export class SessionState {
       throw stateError('agy session state could not be saved');
     }
     return record;
+  }
+
+  // The cross-process guard is the ownership lock this instance already holds; the
+  // caller adds the in-process one by refusing to reconcile while another turn of
+  // this adapter is running on the channel. Under both, a record left `blocked` can
+  // only come from a turn that is already dead, so the conversation is resumed and
+  // the block is lifted. A record blocked before any conversation existed carries
+  // nothing to resume and is removed, which starts the next turn fresh.
+  async reconcile(scope) {
+    if (!this.enabled) return { reconciled: false, conversationId: null };
+    if (!validScope(scope)) throw stateError('agy session state scope is invalid');
+    await this.ensureOwnership(scope.channelId);
+    let raw;
+    try { raw = JSON.parse(await readFile(this.path(scope.channelId), 'utf8')); }
+    catch (error) {
+      if (error?.code === 'ENOENT') return { reconciled: false, conversationId: null };
+      throw stateError('agy session state is corrupted');
+    }
+    const current = sanitizeRecord(raw);
+    if (!sameScope(current.scope, scope)) throw stateError('agy session state scope mismatch', 'AGY_SESSION_SCOPE_MISMATCH');
+    if (current.status === 'ready') return { reconciled: false, conversationId: current.conversationId };
+    if (!CONVERSATION_RE.test(current.conversationId ?? '')) {
+      await rm(this.path(scope.channelId), { force: true });
+      return { reconciled: true, conversationId: null };
+    }
+    const restored = await this.save(scope, current.conversationId);
+    return { reconciled: true, conversationId: restored.conversationId };
   }
 
   async invalidate(scope) {

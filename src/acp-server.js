@@ -1,5 +1,6 @@
-import { randomUUID } from 'node:crypto';
-import { isAbsolute } from 'node:path';
+import { createHash, randomUUID } from 'node:crypto';
+import { isAbsolute, join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { promptToText } from './prompt.js';
 import { AgySession } from './agy-session.js';
 import { parseBuzzContext } from './buzz-context.js';
@@ -8,8 +9,52 @@ import { createConfiguredOutbox } from './delivery/outbox.js';
 import { getBuzzPublicKey } from './delivery/identity.js';
 import { createConfiguredSessionState } from './session-state.js';
 import { listModels, modelConfigOptions } from './models.js';
+import { createSteeringCoordinator, inspectSteeringBridge, reconcileSteeringBridge, MAX_STEERING_TEXT_LENGTH } from './steering.js';
 
 const JSON_RPC = '2.0';
+const TERMINAL_SESSION_CONTEXT_MESSAGE = 'agy session context lost; resume unsupported';
+const STEERING_RPC_CODE = -32004;
+const STEERING_UNCERTAIN_MESSAGE = 'agy steering outcome is uncertain';
+const OWNER_RE = /^[0-9a-f]{64}$/i;
+
+function envFlag(value) {
+  return value === '1' || value === 'true';
+}
+
+function steeringConfiguration(env = process.env, override = {}) {
+  const hookConfigured = override.hookConfigured ?? envFlag(env.AGY_STEER_HOOK_CONFIGURED);
+  const injectorExclusive = override.injectorExclusive ?? envFlag(env.AGY_STEER_INJECTOR_EXCLUSIVE);
+  const ownerId = override.ownerId ?? env.AGY_STEER_OWNER ?? env.AGY_SESSION_OWNER;
+  return {
+    hookConfigured,
+    injectorExclusive,
+    ownerId,
+    rootDir: override.rootDir ?? env.AGY_STEER_ROOT_DIR,
+    enabled: Boolean(hookConfigured && injectorExclusive && OWNER_RE.test(ownerId ?? ''))
+  };
+}
+
+function steeringRpcError(message, code = STEERING_RPC_CODE) {
+  return Object.assign(new Error(message), { rpcCode: code, rpcMessage: message, code: 'AGY_STEER_PROTOCOL' });
+}
+
+function normalizeSteeringPrompt(prompt) {
+  if (!Array.isArray(prompt) || prompt.length === 0) {
+    throw steeringRpcError('agy steering prompt must contain text blocks', -32602);
+  }
+  let text = '';
+  for (const block of prompt) {
+    if (!block || block.type !== 'text' || typeof block.text !== 'string') {
+      throw steeringRpcError('only ACP text steering prompt blocks are supported', -32602);
+    }
+    text += block.text;
+    if (text.length > MAX_STEERING_TEXT_LENGTH) {
+      throw steeringRpcError('agy steering prompt is too long', -32602);
+    }
+  }
+  if (text.trim().length === 0) throw steeringRpcError('agy steering prompt is invalid', -32602);
+  return text;
+}
 
 function rpcResult(id, result) {
   return { jsonrpc: JSON_RPC, id, result };
@@ -38,7 +83,7 @@ export function describePromptShape(prompt) {
   return `blocks=${prompt.length} ${blocks.join(' ; ')}`;
 }
 
-export function createAcpServer({ input = process.stdin, output = process.stdout, diagnostics = process.stderr, sessionFactory, publisherFactory, outboxFactory, identityFactory, sessionStateFactory, modelCatalogFactory } = {}) {
+export function createAcpServer({ input = process.stdin, output = process.stdout, diagnostics = process.stderr, sessionFactory, publisherFactory, outboxFactory, identityFactory, sessionStateFactory, modelCatalogFactory, steeringFactory, steeringConfig, steeringSupported } = {}) {
   const sessions = new Map();
   const activeTurns = new Map();
   const recoveries = new Map();
@@ -63,6 +108,9 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
   }));
   const outbox = outboxFactory ? outboxFactory() : createConfiguredOutbox();
   const sessionState = sessionStateFactory ? sessionStateFactory() : createConfiguredSessionState();
+  const resolvedSteeringConfig = steeringConfiguration(process.env, steeringConfig);
+  const steeringCapability = Boolean(steeringSupported ?? Boolean(steeringFactory ? true : resolvedSteeringConfig.enabled));
+  const makeSteering = steeringFactory ?? ((options) => createSteeringCoordinator(options));
   const makeIdentity = identityFactory ?? (() => getBuzzPublicKey({
     command: process.env.BUZZ_CLI_COMMAND || 'buzz',
     prefixArgs: process.env.BUZZ_FAKE_SCRIPT ? [process.env.BUZZ_FAKE_SCRIPT] : []
@@ -71,6 +119,144 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
   let initialized = false;
   let closing = false;
   let buffer = '';
+
+  function steeringLocation(channelId) {
+    const ownerId = resolvedSteeringConfig.ownerId ?? sessionState?.owner;
+    const rootDir = resolvedSteeringConfig.rootDir ?? join(tmpdir(), 'agy-buzz-steering');
+    const bridgeKey = createHash('sha256').update(`${ownerId ?? 'test'}:${channelId}`).digest('hex');
+    const steeringSessionId = `channel_${createHash('sha256').update(channelId).digest('hex').slice(0, 96)}`;
+    return { ownerId, rootDir, bridgeDir: join(rootDir, `channel-${bridgeKey}`), steeringSessionId };
+  }
+
+  // Channels whose current turn has invalidated durable state and has not yet
+  // finished. This is a liveness guard, not process-lifetime ownership: once the
+  // turn fully settles, a later prompt may reconcile under the durable outbox and
+  // channel-lock guards, exactly as a fresh adapter process would.
+  const channelsWithLiveBlock = new Set();
+
+  // Durable half of the same question, and the only one that survives a restart: an
+  // outbox record still `inflight` or `uncertain` means an external effect happened
+  // whose outcome nobody has settled. That block is not orphaned, it is waiting for
+  // an operator, and reconciliation must leave it exactly where it is.
+  //
+  // A disabled or unreadable outbox cannot answer that question at all, and an
+  // unanswered question refuses. Answering `no unsettled delivery` there left the
+  // only durable condition inert in the default configuration, where the outbox
+  // is off, and every test of reconciliation ran in exactly that configuration.
+  const unsettledDeliveryRefusal = async (channelId) => {
+    if (!outbox?.enabled || typeof outbox.list !== 'function') return 'delivery outbox is disabled';
+    let records;
+    try { records = await outbox.list(); }
+    catch { return 'delivery outbox is unreadable'; }
+    return records.some((record) => record?.channelId === channelId &&
+      (record.status === 'uncertain' || record.status === 'inflight'))
+      ? 'an unsettled delivery is waiting'
+      : null;
+  };
+
+  // In-process half of the reconciliation guard. The other half is the session
+  // ownership lock, which no second adapter can hold at the same time; together they
+  // prove that durable state left blocked belongs to a turn that is already dead.
+  const channelBusyElsewhere = (channelId, sessionId) => {
+    for (const activeSessionId of activeTurns.keys()) {
+      if (activeSessionId === sessionId) continue;
+      if (sessions.get(activeSessionId)?.channelId === channelId) return true;
+    }
+    return false;
+  };
+
+  // Retain the liveness guard through cleanup; no recovery can race an active turn.
+  const settleLiveBlock = (channelId, sessionId) => {
+    if (!channelId || channelBusyElsewhere(channelId, sessionId)) return;
+    channelsWithLiveBlock.delete(channelId);
+  };
+
+  const reconciliationRefusal = async (channelId, sessionId) => {
+    if (channelsWithLiveBlock.has(channelId)) return 'a live turn in this process owns the block';
+    if (channelBusyElsewhere(channelId, sessionId)) return 'another turn holds the channel';
+    return unsettledDeliveryRefusal(channelId);
+  };
+
+  // Steering runs before the durable state is scoped, so the channel ownership lock
+  // that `load` and `invalidate` take is not held yet when a bridge is inspected.
+  // Without it a second adapter on the same channel could archive a bridge that
+  // still belongs to a live turn, so a bridge is reconciled only where this instance
+  // can take that lock. Acquiring it here is idempotent: the turn takes it anyway.
+  const steeringReconciliationRefusal = async (channelId, sessionId) => {
+    if (!sessionState?.enabled) return 'durable session state is disabled';
+    try { await sessionState.ensureOwnership(channelId); }
+    catch { return 'the channel ownership lock is held elsewhere'; }
+    return reconciliationRefusal(channelId, sessionId);
+  };
+
+  async function inspectExistingSteering(entry, channelId, sessionId) {
+    if (!steeringCapability || steeringFactory) return;
+    const location = steeringLocation(channelId);
+    if (!OWNER_RE.test(location.ownerId ?? '')) return;
+    const status = await inspectSteeringBridge({
+      bridgeDir: location.bridgeDir,
+      ownerId: location.ownerId,
+      channelId
+    });
+    // The bridge on disk is authoritative and is inspected on every prompt. Copying
+    // the verdict onto the pool entry would keep masking a repaired bridge for the
+    // whole life of this process, long after the durable state became sound again.
+    if (!status.blocked) return;
+    const refusal = await steeringReconciliationRefusal(channelId, sessionId);
+    if (refusal) {
+      report(`steering reconciliation refused channel=${channelId} reason=${refusal}`);
+      throw steeringRpcError('agy steering is durably blocked');
+    }
+    const { archivedTo } = await reconcileSteeringBridge({
+      bridgeDir: location.bridgeDir,
+      ownerId: location.ownerId,
+      channelId
+    });
+    if (!archivedTo) throw steeringRpcError('agy steering is durably blocked');
+    // The coordinator cached on the entry still points at the directory that was just
+    // renamed. Drop it so `ensureSteering` builds one on the bridge that replaces it.
+    entry.steering = null;
+    entry.session.setSteeringCoordinator?.(null);
+    report(`steering bridge reconciled channel=${channelId} archived=${archivedTo}`);
+  }
+
+  async function ensureSteering(entry, channelId) {
+    if (!steeringCapability || entry.steering) return entry.steering ?? null;
+    const knownConversationId = entry.session.getConversationId?.();
+    const ownerId = resolvedSteeringConfig.ownerId ?? sessionState?.owner;
+    if (!steeringFactory && !OWNER_RE.test(ownerId ?? '')) return null;
+    const location = steeringLocation(channelId);
+    const conversationBound = typeof knownConversationId === 'string' && knownConversationId.length > 0;
+    const conversationId = conversationBound ? knownConversationId : `pending-${location.steeringSessionId}`;
+    const coordinator = await makeSteering({
+      rootDir: location.rootDir,
+      bridgeDir: location.bridgeDir,
+      ownerId,
+      channelId,
+      sessionId: location.steeringSessionId,
+      conversationId,
+      hookConfigured: steeringFactory ? true : resolvedSteeringConfig.hookConfigured,
+      injectorExclusive: steeringFactory ? true : resolvedSteeringConfig.injectorExclusive,
+      conversationBound
+    });
+    if (!coordinator?.enabled || typeof coordinator.enqueue !== 'function' ||
+        typeof coordinator.observeUserInput !== 'function' || typeof coordinator.snapshot !== 'function' ||
+        typeof coordinator.block !== 'function') {
+      throw steeringRpcError('agy steering dedicated hook is unavailable');
+    }
+    coordinator.assertBinding?.({ ownerId, channelId, sessionId: location.steeringSessionId, conversationId });
+    entry.steering = coordinator;
+    entry.session.setSteeringCoordinator?.(coordinator);
+    return coordinator;
+  }
+
+  // With durable session state the record on disk already carries the block, and
+  // `session/prompt` reads it again on every turn. Only the memory-only mode has no
+  // record to re-read, so it is the only mode that still needs a sticky marker.
+  const blockEntry = (entry) => {
+    if (sessionState?.enabled) return;
+    entry.stateError ??= TERMINAL_SESSION_CONTEXT_MESSAGE;
+  };
 
   const write = (message) => output.write(`${JSON.stringify(message)}\n`);
   const report = (message) => diagnostics.write(`[agy-buzz-acp] ${message}\n`);
@@ -105,7 +291,8 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
             promptCapabilities: { image: false, audio: false, embeddedContext: false },
             mcpCapabilities: { http: false, sse: false }
           },
-          agentInfo: { name: 'agy-buzz-acp', version: '0.4.1' }
+          _meta: { steering: { supported: steeringCapability } },
+            agentInfo: { name: 'agy-buzz-acp', version: '0.5.8' }
         }));
         return;
       }
@@ -148,8 +335,9 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
           model: requestedModel
         });
         session.setModelCatalog?.(catalog);
-        sessions.set(sessionId, { session, cwd: params.cwd,
-          model: requestedModel, modelCatalog: catalog, bound: false, stateError: null });
+        sessions.set(sessionId, { session, sessionId, cwd: params.cwd,
+          model: requestedModel, modelCatalog: catalog, bound: false, stateError: null,
+          steering: null, systemPrompt, needsReplacement: false });
         if (id !== undefined) write(rpcResult(id, { sessionId, configOptions: modelConfigOptions(catalog, requestedModel) }));
         return;
       }
@@ -171,12 +359,26 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
         if (id !== undefined) write(rpcResult(id, { configOptions: modelConfigOptions(entry.modelCatalog, value) }));
         return;
       }
+      if (message.method === '_session/steering') {
+        const entry = sessions.get(params.sessionId);
+        if (!entry) throw Object.assign(new Error('unknown session'), { rpcCode: -32001 });
+        if (!steeringCapability || !entry.steering || typeof entry.session.steer !== 'function') {
+          throw steeringRpcError('agy steering is unavailable without a confirmed dedicated hook');
+        }
+        if (entry.stateError) throw steeringRpcError(entry.stateError);
+        const steerText = normalizeSteeringPrompt(params.prompt);
+        const outcome = await entry.session.steer(steerText);
+        if (outcome?.outcome !== 'injected') throw steeringRpcError(STEERING_UNCERTAIN_MESSAGE);
+        if (id !== undefined) write(rpcResult(id, { outcome: 'injected' }));
+        return;
+      }
       if (message.method === 'session/prompt') {
         if (Object.prototype.hasOwnProperty.call(params, 'model')) throw Object.assign(new Error('model override is not supported'), { rpcCode: -32602 });
         const entry = sessions.get(params.sessionId);
         if (!entry) throw Object.assign(new Error('unknown session'), { rpcCode: -32001 });
-        const session = entry.session;
+        let session = entry.session;
         if (activeTurns.has(params.sessionId)) throw Object.assign(new Error('session turn is busy'), { rpcCode: -32002 });
+        if (entry.stateError) throw Object.assign(new Error(entry.stateError), { rpcCode: -32603, rpcMessage: entry.stateError });
         const text = promptToText(params.prompt);
         report(`session/prompt blocks=${Array.isArray(params.prompt) ? params.prompt.length : 0}`);
         const buzzContext = parseBuzzContext(params.prompt);
@@ -188,15 +390,18 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
           throw Object.assign(new Error('agy session channel scope cannot change'), { rpcCode: -32602, rpcMessage: 'agy session channel scope cannot change' });
         }
         entry.channelId ??= buzzContext.channelId;
+        // Reserve before the first await, including steering inspection/recovery.
         const controller = new AbortController();
         activeTurns.set(params.sessionId, controller);
         let stateScope = null;
         try {
+          if ((sessionState?.enabled || steeringCapability) && channelBusyElsewhere(buzzContext.channelId, params.sessionId)) {
+            throw steeringRpcError('agy channel turn is busy');
+          }
           if (sessionState?.configurationError) {
             throw Object.assign(new Error(sessionState.configurationError), { rpcCode: -32602, rpcMessage: sessionState.configurationError });
           }
           if (sessionState?.enabled) {
-            if (entry.stateError) throw Object.assign(new Error(entry.stateError), { rpcCode: -32603, rpcMessage: entry.stateError });
             await sessionState.verifyIdentity(makeIdentity);
             stateScope = await sessionState.scope({ channelId: buzzContext.channelId, cwd: entry.cwd, model: entry.model });
             const existingSessionId = channelSessions.get(buzzContext.channelId);
@@ -204,13 +409,58 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
               throw Object.assign(new Error('agy channel session is already owned'), { rpcCode: -32002, rpcMessage: 'agy channel session is already owned' });
             }
             channelSessions.set(buzzContext.channelId, params.sessionId);
+          }
+          if (entry.needsReplacement) {
+            if (!stateScope) throw steeringRpcError('agy recovery requires durable session state');
+            const refusal = await reconciliationRefusal(buzzContext.channelId, params.sessionId);
+            if (refusal) {
+              report(`session recovery refused channel=${buzzContext.channelId} reason=${refusal}`);
+              throw Object.assign(new Error('agy session state is blocked after an incomplete turn'), { rpcMessage: 'agy session state is blocked after an incomplete turn' });
+            }
+            if (typeof session.retireForRecovery !== 'function' || await session.retireForRecovery() !== true) {
+              throw steeringRpcError('agy provider retirement could not be confirmed');
+            }
+          }
+          // A failed provider must be confirmed closed BEFORE disk reconciliation.
+          if (steeringCapability) await inspectExistingSteering(entry, buzzContext.channelId, params.sessionId);
+          if (sessionState?.enabled) {
+            let saved;
+            try {
+              saved = await sessionState.load(stateScope);
+            } catch (error) {
+              if (error?.code !== 'AGY_SESSION_STATE_BLOCKED') throw error;
+              const refusal = await reconciliationRefusal(buzzContext.channelId, params.sessionId);
+              if (refusal) {
+                report(`session record reconciliation refused channel=${buzzContext.channelId} reason=${refusal}`);
+                throw error;
+              }
+              const outcome = await sessionState.reconcile(stateScope);
+              if (!outcome.reconciled) throw error;
+              report(`session record reconciled channel=${buzzContext.channelId} conversation=${outcome.conversationId ?? 'none'}`);
+              saved = await sessionState.load(stateScope);
+            }
+            if (entry.needsReplacement) {
+              // Do not reset contextLost on the failed object or reuse its buffers.
+              // Rebind only the association validated above, never an unconfirmed ID.
+              const replacement = makeSession({ sessionId: params.sessionId, cwd: entry.cwd,
+                model: entry.model, systemPrompt: entry.systemPrompt });
+              if (!replacement || replacement === session) throw steeringRpcError('agy replacement session is unavailable');
+              replacement.setModelCatalog?.(entry.modelCatalog);
+              entry.session = session = replacement;
+              entry.bound = false;
+              entry.steering = null;
+              entry.needsReplacement = false;
+              report(`provider session rebuilt channel=${buzzContext.channelId}; interrupted work is not replayed by the adapter`);
+              emitDeliveryDiagnostic(params.sessionId, 'Previous turn interrupted; provider session rebuilt. Prior correction consumption and external effects may remain uncertain.');
+            }
             if (!entry.bound) {
-              const saved = await sessionState.load(stateScope);
               if (saved) session.setTrustedConversation?.(saved.conversationId);
               entry.bound = true;
             }
             await sessionState.invalidate(stateScope);
+            channelsWithLiveBlock.add(buzzContext.channelId);
           }
+          if (steeringCapability) await ensureSteering(entry, buzzContext.channelId);
           if (outbox?.configurationError) {
             throw Object.assign(new Error(outbox.configurationError), { rpcCode: -32602, rpcMessage: outbox.configurationError });
           }
@@ -219,7 +469,13 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
           if (controller.signal.aborted) throw Object.assign(new Error('prompt cancelled'), { code: 'CANCELLED' });
         } catch (error) {
           activeTurns.delete(params.sessionId);
-          if (channelSessions.get(buzzContext.channelId) === params.sessionId) channelSessions.delete(buzzContext.channelId);
+          settleLiveBlock(buzzContext.channelId, params.sessionId);
+          // Retain the channel pin after an unconfirmed retirement: a new ACP
+          // session must not bypass the failed session's recovery guard.
+          if (!entry.needsReplacement && channelSessions.get(buzzContext.channelId) === params.sessionId) {
+            channelSessions.delete(buzzContext.channelId);
+          }
+          if (stateScope) blockEntry(entry);
           throw error;
         }
         const toolCallId = `delivery_${randomUUID().replaceAll('-', '')}`;
@@ -232,7 +488,11 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
           status,
           content: [{ type: 'content', content: { type: 'text', text: content } }]
         });
+        let providerStarted = false;
+        let turnSafe = false;
+        let providerRetired = false;
         try {
+          providerStarted = true;
           const response = await session.prompt(text, (delta) => write({
             jsonrpc: JSON_RPC,
             method: 'session/update',
@@ -254,6 +514,7 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
             report(`outbox prepare failed code=${error?.code ?? 'unknown'} recovery=${recoveryId}`);
           }
           if (durabilityFailed) {
+            blockEntry(entry);
             const delivery = { status: 'failed-before-start', recoveryId };
             deliveryActivity('tool_call_update', 'Publication failed', 'failed', `Publication failed; recovery ${recoveryId}`);
             emitDeliveryDiagnostic(params.sessionId, delivery.status, recoveryId);
@@ -268,6 +529,7 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
           }
           if (!publication || typeof publication !== 'object') publication = { status: 'uncertain' };
           const status = ['sent', 'failed-before-start', 'uncertain'].includes(publication.status) ? publication.status : 'uncertain';
+          if (status !== 'sent') blockEntry(entry);
           if (recoveryId) {
             try { await outbox.update(recoveryId, { status, ...(publication.eventId ? { eventId: publication.eventId } : {}) }); }
             catch (error) { report(`outbox update failed code=${error?.code ?? 'unknown'} recovery=${recoveryId}`); }
@@ -278,13 +540,60 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
           else deliveryActivity('tool_call_update', 'Delivery uncertain', 'failed', `Delivery uncertain; recovery ${recoveryId ?? 'unavailable'}`);
           if (status === 'sent' && stateScope && sessionState?.enabled) {
             try {
+              if (steeringCapability) {
+                await ensureSteering(entry, buzzContext.channelId);
+                if (entry.steering && !providerRetired) {
+                  const steeringConversationId = session.getConversationId?.();
+                  if (typeof session.retireForCheckpoint !== 'function' ||
+                      await session.retireForCheckpoint() !== steeringConversationId) {
+                    throw steeringRpcError('agy steering provider retirement could not be confirmed');
+                  }
+                  providerRetired = true;
+                }
+              }
               const conversationId = session.getConversationId?.();
               if (conversationId && session.hasConfirmedConversation?.()) {
+                if (!providerRetired && (typeof session.retireForCheckpoint !== 'function' ||
+                    await session.retireForCheckpoint() !== conversationId)) {
+                  throw new Error('provider retirement could not be confirmed');
+                }
+                if (!providerRetired) {
+                  providerRetired = true;
+                }
+                if (controller.signal.aborted) throw new Error('checkpoint cancelled');
                 await sessionState.save(stateScope, conversationId);
+                // Maintenance constraint: this removal stays immediately after the save,
+                // with no await in between. `reconciliationRefusal` reads
+                // `channelsWithLiveBlock` as the in-process proof that a live turn owns the
+                // channel. A gap between the two would show the channel as free while the
+                // record on disk is already settled, or the reverse if the order flipped.
+                channelsWithLiveBlock.delete(buzzContext.channelId);
+                turnSafe = true;
+              } else {
+                blockEntry(entry);
               }
             } catch (error) {
-              entry.stateError = 'agy session association could not be saved';
+              // `save` did not run, so the record on disk stays blocked and the next
+              // turn reads it. A sticky marker here would only hide a later repair.
               report('session association could not be saved');
+            }
+          } else if (status === 'sent' && !sessionState?.enabled) {
+            try {
+              if (steeringCapability) {
+                await ensureSteering(entry, buzzContext.channelId);
+                if (entry.steering && !providerRetired) {
+                  const steeringConversationId = session.getConversationId?.();
+                  if (typeof session.retireForCheckpoint !== 'function' ||
+                      await session.retireForCheckpoint() !== steeringConversationId) {
+                    throw steeringRpcError('agy steering provider retirement could not be confirmed');
+                  }
+                  providerRetired = true;
+                }
+              }
+              turnSafe = true;
+            } catch (error) {
+              entry.stateError = error?.rpcMessage ?? 'agy steering provider retirement could not be confirmed';
+              report('steering provider retirement could not be confirmed');
             }
           }
           if (status !== 'sent') {
@@ -297,7 +606,12 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
             write(rpcResult(id, { stopReason: 'end_turn', publication: delivery }));
           }
         } finally {
+          if (providerStarted && !turnSafe) {
+            blockEntry(entry);
+            entry.needsReplacement = true;
+          }
           activeTurns.delete(params.sessionId);
+          settleLiveBlock(buzzContext.channelId, params.sessionId);
         }
         return;
       }

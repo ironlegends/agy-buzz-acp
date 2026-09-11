@@ -30,7 +30,7 @@ function addRecord(summary, kind, record) {
 }
 
 function lockResult() {
-  return { total: 0, stale: 0, 'live-pid': 0, unknown: 0, symlink: 0 };
+  return { total: 0, stale: 0, 'live-pid': 0, 'native-file': 0, unknown: 0, symlink: 0 };
 }
 
 function isLockName(name) {
@@ -42,6 +42,9 @@ async function lockState(dir, name, { fsImpl, processAliveImpl }) {
   try {
     const details = await fsImpl.lstat(join(dir, name));
     if (details?.isSymbolicLink?.()) return { status: 'symlink' };
+    // A persistent native lock file is not evidence that its OS lock is held.
+    // Offline diagnostics never acquire or release another session's lock.
+    if (details?.isFile?.()) return { status: 'native-file' };
     if (details?.isDirectory?.() === false) return result;
     const ownerPath = join(dir, name, 'owner');
     let ownerText;

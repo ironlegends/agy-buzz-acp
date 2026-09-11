@@ -1,6 +1,6 @@
 # agy-buzz-acp
 
-A dependency-free, English-language ACP stdio bridge between Buzz and the official Antigravity CLI (`agy`). It preserves one provider conversation per Buzz session, reports activity separately from the answer, and publishes the final answer through the Buzz CLI.
+A minimal-dependency ACP stdio bridge between Buzz and the official Antigravity CLI (`agy`). It preserves one provider conversation per Buzz session, reports activity separately from the answer, and publishes the final answer through the Buzz CLI.
 
 This is a community adapter for Buzz. It is not a general-purpose ACP client adapter, a Google product, or a replacement for either CLI.
 
@@ -18,6 +18,7 @@ The JavaScript runtime uses standard Node APIs. Windows has real-provider valida
 Download an archive from the [releases page](https://github.com/ironlegends/agy-buzz-acp/releases), or build from a source checkout:
 
 ```sh
+npm ci
 npm test
 npm pack
 ```
@@ -25,10 +26,10 @@ npm pack
 Install the generated archive, or an archive from a reviewed release:
 
 ```sh
-npm install --global ./agy-buzz-acp-0.4.1.tgz
+npm install --global ./agy-buzz-acp-0.5.8.tgz
 ```
 
-The package provides `agy-buzz-acp`, `agy-buzz-recover`, `agy-buzz-doctor`, and `agy-buzz-manage`. No npm dependencies are needed. No npm-registry publication is required to install the archive.
+The package provides `agy-buzz-acp`, `agy-buzz-recover`, `agy-buzz-doctor`, `agy-buzz-manage`, and `agy-buzz-steer-hook`. The native file-lock dependency and its bundled support packages are included in the release archive. No npm-registry publication is required to install the archive.
 
 Generate the custom harness settings using your actual installation paths:
 
@@ -58,6 +59,10 @@ The default diagnostic is offline and does not log in, send messages, run provid
 | `AGY_SESSION_OWNER` | Public Buzz identity, 64 hexadecimal characters; required with the session directory. |
 | `AGY_OUTBOX_DIR` | Optional trusted local directory for final answers and delivery state. |
 | `AGY_OUTBOX_OWNER` | Public Buzz identity, 64 hexadecimal characters; required with the outbox directory. |
+| `AGY_STEER_HOOK_CONFIGURED` | Set to `1` only when the dedicated official agy PostInvocation hook is installed and configured. |
+| `AGY_STEER_INJECTOR_EXCLUSIVE` | Set to `1` only when this hook is the sole steering injector for the provider. |
+| `AGY_STEER_OWNER` | Public Buzz identity, 64 hexadecimal characters; falls back to `AGY_SESSION_OWNER`. |
+| `AGY_STEER_ROOT_DIR` | Optional trusted local directory for steering bridge state. |
 
 Buzz supplies its own relay and managed identity environment. Do not copy another installation's credentials or embed them in custom harness examples. Optional state belongs to the local installation and identity.
 
@@ -76,6 +81,8 @@ Persisted conversations retain their model scope. Selecting a different model ca
 If catalog discovery fails, the configured model remains usable and no model list is invented. Check the official CLI's installation and authentication separately. ACP `initialize`, CLI help/version, setup and offline doctor do not query the model catalog.
 ## Activity and delivery
 
+The bridge publication directive is sent on the first prompt of each provider process, including resumed conversations. Other authorized Buzz operations remain available; the provider must leave publication of this reply to the adapter. Empty, whitespace-only or non-string answers are rejected before outbox preparation or publication. This adopts the publication fixes proposed by Xeoneid in PR #9, with resume coverage.
+
 Activity Log distinguishes provider generation, available tool activity, and Buzz delivery. Activities carry unique IDs and available durations. Parameters, raw tool results, provider errors and hidden reasoning are not forwarded.
 
 The provider protocol examined does not expose a textual reasoning summary. No synthetic `agent_thought_chunk` is generated. The final provider response is published separately from activity events.
@@ -93,13 +100,15 @@ Delivery states:
 
 The adapter rotates an aging provider process between completed turns, at 21 hours, leaving three hours before agy's 24-hour process limit (one hour of dispatch margin beyond a two-hour Buzz turn). It waits for the old child to close, starts `agy --conversation` with the confirmed identifier, and requires a matching `init` before sending the next prompt. Rotation does not interrupt an active turn or replay a previous prompt.
 
-For optional continuity across an orderly adapter shutdown, configure both `AGY_SESSION_DIR` and `AGY_SESSION_OWNER`. Buzz must supply `BUZZ_RELAY_URL`. A configured `AGY_RELAY_URL` must agree with that actual publisher endpoint; it cannot silently override it for session recovery.
+For optional continuity across adapter termination and restart, configure both `AGY_SESSION_DIR` and `AGY_SESSION_OWNER`. Buzz must supply `BUZZ_RELAY_URL`. A configured `AGY_RELAY_URL` must agree with that actual publisher endpoint; it cannot silently override it for session recovery. Version 0.5.3 uses native OS locks, so recovery does not depend on a graceful Buzz shutdown after a completed checkpoint.
 
 Associations are scoped to the verified public Buzz identity, relay, canonical working directory, model and channel. They contain an identifier and scope metadata, not conversation text or credentials. A channel lock prevents concurrent owners. The adapter only records readiness after successful final-answer delivery and invalidates readiness before the next turn.
 
-Interrupted or uncertain work, corrupted state, mismatched scope and stale locks block automatic recovery. Abrupt termination may leave a lock requiring operator reconciliation. The adapter does not automatically remove stale locks, replay interrupted work or reconcile uncertain relay publication. The recovery CLI described below is for retained answers, not for overriding conversation locks.
+Corrupted state and mismatched scope block automatic recovery. A native lock file may remain after release; its presence is not evidence of an active owner. The adapter does not automatically remove lock files, replay interrupted work or reconcile uncertain relay publication. The recovery CLI described below is for retained answers, not for overriding conversation locks.
 
-If a conversation is blocked, stop its adapter and reconcile the provider and relay state first. To deliberately start a new conversation after that check, configure a new empty private session directory and preserve the old directory as evidence. This is an operator decision that discards continuity; it is not automatic recovery or prompt replay.
+A record left blocked by an interrupted turn is reconciled on the next prompt only after the turn that wrote it has fully settled. Three durable/liveness conditions must hold: the adapter holds the channel ownership lock, which no second adapter can take; no turn is still running on that channel; and no `inflight` or `uncertain` delivery for that channel remains in the outbox. The 0.5.8 candidate additionally requires a bounded, confirmed provider close before reconciling a failed turn in the same process. It constructs a new provider-session object and binds only the validated stored conversation, without clearing context-loss flags on the failed object. Unknown retirement refuses without archiving the bridge. The conversation is resumed when the record still names one, and the record is removed when the turn died before any conversation existed. A blocked steering bridge is renamed to a sibling `-archived-<timestamp>` directory and rebuilt. Reconciliation therefore requires both a private session directory and a delivery outbox: without the outbox the delivery condition cannot be evaluated, and a condition that cannot be evaluated refuses. Every reconciliation and every refusal writes a diagnostic line naming the condition that closed the door. Reconciliation lifts a block; it never internally resubmits the interrupted prompt or archived correction and never turns an uncertain publication into a delivered one. The next submitted prompt is separate: Buzz may itself requeue prior events, so this is not an exactly-once guarantee for external tools. Archived corrections remain of uncertain consumption, not proven undelivered.
+
+To deliberately start a new conversation instead, configure a new empty private session directory and preserve the old directory as evidence. This is an operator decision that discards continuity; it is not automatic recovery or prompt replay.
 
 Use a separate private state directory for each managed identity. Do not copy these records between machines. The same plaintext and Windows ACL limitations as the outbox apply.
 ## Retaining an undelivered answer
@@ -124,7 +133,7 @@ If an enabled outbox cannot write, the active adapter can retain a `mem_*` recov
 - `initialize` accepts ACP protocolVersion 1 or 2 and negotiates stable v1 semantics.
 - `session/new` requires an absolute working directory, creates an isolated session and advertises discovered model options when available.
 - `session/set_config_option` accepts the model choice only before the first prompt, using an ID offered by that session.
-- `session/prompt` accepts text blocks with a valid Buzz transport envelope. Both historical bracket markers and current XML markers are supported. The current Context block alone supplies the destination; duplicates and contradictory destinations are rejected before calling the provider.
+- `session/prompt` accepts text blocks with a valid Buzz transport envelope. Both historical bracket markers and current XML markers are supported. The current Context block alone supplies the destination; duplicates and contradictory destinations are rejected before calling the provider. A top-level channel prompt whose Context block names no destination falls back to the triggering event: a single `<buzz-event>` block, one `Event ID:` line above its `Content:` line, and a `Channel:` line equal to the Context channel. Any ambiguity refuses the prompt instead of guessing.
 - `session/cancel` interrupts provider/publication work without replaying the prompt.
 - Images, audio, embedded context and bridging `mcpServers` are not supported. Provider-local tools remain governed by the provider's own configuration.
 
@@ -161,4 +170,4 @@ Use `agy-buzz-doctor --harness /path/to/harness.json --json` to inspect the conf
 
 Use `agy-buzz-manage` to plan a local archive installation or rollback. Supply the expected SHA-256 from a trusted release reference. Changes require `--apply`; the tool does not restart agents or refresh Desktop. See [upgrades and rollback](docs/UPGRADING.md).
 
-The [shutdown limitation](docs/COMPATIBILITY.md#shutdown-limitation-in-buzz) must be resolved before relying on durable conversation recovery across a Buzz restart. Outbox recovery and conversation recovery are separate mechanisms.
+See [recovery with official Buzz](docs/OFFICIAL_BUZZ_RECOVERY.md) for the native-lock design, forced-stop boundaries and migration requirements. Outbox recovery and conversation recovery remain separate mechanisms. Native dependencies are bundled in the release archive; do not copy only the JavaScript files when installing an extracted runtime.
