@@ -1,17 +1,14 @@
-// Test-only tracing of child lifecycle; never inherited by a live runtime.
-import cp from 'node:child_process';
-import { syncBuiltinESMExports } from 'node:module';
+// Test-only tracing at the ChildProcess primitive; preserve execFile promisification.
+import { ChildProcess } from 'node:child_process';
 import { basename } from 'node:path';
-const log = (phase, command, pid, details = '') => process.stderr.write(`[probe-process] parent=${process.pid} phase=${phase} command=${basename(String(command))} pid=${pid ?? 'none'} ${details}\n`);
-for (const method of ['spawn', 'execFile']) {
-  const original = cp[method];
-  cp[method] = function(command, ...args) {
-    const child = original.call(this, command, ...args);
-    log('start',command,child.pid);
-    child.once('error',e => log('error',command,child.pid,e.code));
-    child.once('exit',(code,signal) => log('exit',command,child.pid,`${code}/${signal}`));
-    child.once('close',(code,signal) => log('close',command,child.pid,`${code}/${signal}`));
-    return child;
-  };
-}
-syncBuiltinESMExports();
+const original = ChildProcess.prototype.spawn;
+ChildProcess.prototype.spawn = function(options) {
+  const result = original.call(this, options);
+  const command = basename(String(options.file));
+  const log = (phase, details = '') => process.stderr.write(`[probe-process] parent=${process.pid} phase=${phase} command=${command} pid=${this.pid ?? 'none'} ${details}\n`);
+  log('start');
+  this.once('error', e => log('error', e.code));
+  this.once('exit', (code, signal) => log('exit', `${code}/${signal}`));
+  this.once('close', (code, signal) => log('close', `${code}/${signal}`));
+  return result;
+};

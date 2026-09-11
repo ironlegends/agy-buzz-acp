@@ -64,5 +64,13 @@ test('unconfirmed retirement prevents disk reconciliation and concurrent recover
     await recovery; assert.match(response(4).error.message,/close.*timed out/);
     assert.equal(await readFile(state.path(channelId),'utf8'),before);
     assert.equal((await readdir(join(dir,'steering'))).some((v) => v.includes('-archived-')), false);
+    // A failed retirement must not unpin the channel so a different ACP session
+    // can skip needsReplacement and reconcile while the first provider lives.
+    await rpc(6,'session/new',{ cwd:dir });
+    const otherSessionId = [...server.sessions.keys()].at(-1);
+    await rpc(7,'session/prompt',{ ...params, sessionId: otherSessionId });
+    assert.equal(response(7).error.code, -32002);
+    assert.equal(await readFile(state.path(channelId),'utf8'),before);
+
   } finally { c.emit('close',1); await server.close(); await state.release(); await rm(dir,{ recursive:true,force:true }); }
 });

@@ -470,7 +470,11 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
         } catch (error) {
           activeTurns.delete(params.sessionId);
           settleLiveBlock(buzzContext.channelId, params.sessionId);
-          if (channelSessions.get(buzzContext.channelId) === params.sessionId) channelSessions.delete(buzzContext.channelId);
+          // Retain the channel pin after an unconfirmed retirement: a new ACP
+          // session must not bypass the failed session's recovery guard.
+          if (!entry.needsReplacement && channelSessions.get(buzzContext.channelId) === params.sessionId) {
+            channelSessions.delete(buzzContext.channelId);
+          }
           if (stateScope) blockEntry(entry);
           throw error;
         }
