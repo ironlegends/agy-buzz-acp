@@ -13,6 +13,38 @@ function stateError(message, code = 'AGY_SESSION_STATE') {
   return Object.assign(new Error(message), { code, rpcMessage: message });
 }
 
+const OWNERSHIP_ERRORS = {
+  AGY_SESSION_STATE_BUSY: 'the channel ownership lock is held elsewhere',
+  AGY_SESSION_STATE_LEGACY_LOCK: 'a legacy channel lock requires controlled migration',
+  AGY_SESSION_STATE_PERMISSIONS: 'channel ownership permissions are insufficient or unsafe',
+  AGY_SESSION_STATE_SCOPE: 'channel ownership scope is invalid',
+  AGY_SESSION_STATE_NATIVE_UNAVAILABLE: 'native channel locking is unavailable',
+  AGY_SESSION_STATE_UNSAFE_LOCK: 'the channel lock path is unsafe',
+  AGY_SESSION_STATE: 'channel ownership could not be established'
+};
+
+export function ownershipFailureReason(error) {
+  return Object.hasOwn(OWNERSHIP_ERRORS, error?.code ?? '')
+    ? OWNERSHIP_ERRORS[error.code] : OWNERSHIP_ERRORS.AGY_SESSION_STATE;
+}
+
+function classifyOwnershipError(error) {
+  const code = error?.code === 'AGY_NATIVE_LOCK_FAILED' ? error?.cause?.code ?? error.code : error?.code;
+  const category = Object.hasOwn(OWNERSHIP_ERRORS, code ?? '') ? code
+    : code === 'AGY_NATIVE_LOCK_BUSY' ? 'AGY_SESSION_STATE_BUSY'
+    : code === 'AGY_NATIVE_LOCK_LEGACY' ? 'AGY_SESSION_STATE_LEGACY_LOCK'
+    : ['EACCES', 'EPERM', 'AGY_NATIVE_LOCK_PERMISSIONS'].includes(code) ? 'AGY_SESSION_STATE_PERMISSIONS'
+    : code === 'AGY_NATIVE_LOCK_UNAVAILABLE' ? 'AGY_SESSION_STATE_NATIVE_UNAVAILABLE'
+    : ['AGY_NATIVE_LOCK_SYMLINK', 'AGY_NATIVE_LOCK_INODE', 'AGY_NATIVE_LOCK_TYPE'].includes(code) ? 'AGY_SESSION_STATE_UNSAFE_LOCK'
+    : 'AGY_SESSION_STATE';
+  // No raw filesystem cause/path is carried into public RPC diagnostics.
+  const message = category === 'AGY_SESSION_STATE_BUSY' ? 'agy session state is owned by another adapter'
+    : category === 'AGY_SESSION_STATE_LEGACY_LOCK' ? 'agy legacy session state lock is unsupported'
+    : category === 'AGY_SESSION_STATE' ? 'agy session state ownership could not be established'
+    : OWNERSHIP_ERRORS[category];
+  return stateError(message, category);
+}
+
 function validScope(scope) {
   return scope && typeof scope === 'object' && CHANNEL_RE.test(scope.channelId ?? '') &&
     OWNER_RE.test(scope.owner ?? '') && typeof scope.relay === 'string' && HASH_RE.test(scope.relay) &&
@@ -64,11 +96,12 @@ export function validateSessionRecord(record) {
 }
 
 export class SessionState {
-  constructor({ dir, owner, relay, realpathFn = realpath, nowFn = () => new Date().toISOString() } = {}) {
+  constructor({ dir, owner, relay, realpathFn = realpath, lockFn = acquireNativeLock, nowFn = () => new Date().toISOString() } = {}) {
     this.dir = typeof dir === 'string' && dir.trim() ? dir : null;
     this.owner = OWNER_RE.test(owner ?? '') ? owner.toLowerCase() : null;
     this.relay = relayHash(relay);
     this.realpathFn = realpathFn;
+    this.lockFn = lockFn;
     this.nowFn = nowFn;
     this.configurationError = (this.dir || owner != null) &&
       (!this.dir || !this.owner || !this.relay)
@@ -83,20 +116,19 @@ export class SessionState {
 
   async ensureOwnership(channelId = 'adapter') {
     if (!this.enabled) return false;
-    await mkdir(this.dir, { recursive: true, mode: 0o700 });
-    await chmod(this.dir, 0o700);
-    if (!CHANNEL_RE.test(channelId) && channelId !== 'adapter') throw stateError('agy session state scope is invalid');
-    const lockPath = join(this.dir, `.${scopeKey(channelId)}.lock`);
-    if (this.ownedChannels.has(channelId)) return true;
-    let lock;
+    if (!CHANNEL_RE.test(channelId) && channelId !== 'adapter') {
+      throw stateError('agy session state scope is invalid', 'AGY_SESSION_STATE_SCOPE');
+    }
     try {
-      lock = await acquireNativeLock(lockPath);
+      await mkdir(this.dir, { recursive: true, mode: 0o700 });
+      await chmod(this.dir, 0o700);
+      const lockPath = join(this.dir, `.${scopeKey(channelId)}.lock`);
+      if (this.ownedChannels.has(channelId)) return true;
+      const lock = await this.lockFn(lockPath);
       this.ownedChannels.set(channelId, lock);
       return true;
     } catch (error) {
-      if (error?.code === 'AGY_NATIVE_LOCK_BUSY') throw stateError('agy session state is owned by another adapter', 'AGY_SESSION_STATE_BUSY');
-      if (error?.code === 'AGY_NATIVE_LOCK_LEGACY') throw stateError('agy legacy session state lock is unsupported', 'AGY_SESSION_STATE_LEGACY_LOCK');
-      throw stateError('agy session state ownership could not be established');
+      throw classifyOwnershipError(error);
     }
   }
 
