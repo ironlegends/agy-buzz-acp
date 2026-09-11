@@ -12,7 +12,15 @@
 
 Do not substitute one level for another. In particular, CI on an OS does not prove that an authenticated Antigravity binary is available or supported there.
 
-## Known baseline
+## Released 0.5.8 evidence
+
+Release [v0.5.8](https://github.com/ironlegends/agy-buzz-acp/releases/tag/v0.5.8), source `ebd02c5199f6288d0096f32976e039c7c6f0b7b7`; archive SHA-256 `38bcb4f5d47f965eeec63187ebc86b470300579bc96619fbe351e0d750ac0b4a`.
+
+The final source/clean-worktree checks recorded 300 tests, 299 local Windows passes and one symlink-privilege skip, with no failure. All nine Node 20/22/24 by Windows/Linux/macOS CI cells passed on the implementation and promotion heads, including extracted-package checks. The final extracted package passed six fault scenarios. Twelve repeated confirmed-steering probes passed after the Windows rename fix.
+
+Separate genuine Google/Gemini tests completed normal and resumed turns, then masked a steering confirmation and held a terminal result to exercise the unchanged watchdog and same-process recovery. Those tests used a synthetic publisher. A separate authorized Desktop/relay check on 2026-09-11 observed all ten instances announcing 0.5.8, a sent reply independently received by Desktop, and a ready checkpoint at 15:47:33 UTC. This is not a visually inspected Activity Log, an OS-universal provider check or an exactly-once guarantee.
+
+## Historical baseline
 
 Before this release, the Windows adapter passed 96 fixture tests. A real provider conversation resumed after a completed turn and child termination. A Buzz message was published and acknowledged. Activity mapping was exercised through Buzz's source parser, but the installed desktop rendering was not visually inspected.
 

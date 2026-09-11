@@ -7,7 +7,9 @@ created: 2026-09-07
 
 # Local installation upgrades and rollback
 
-`agy-buzz-manage` installs a verified release archive into a versioned runtime directory and updates one existing Buzz harness. It never starts the adapter, reloads Buzz settings, or runs code from the archive while validating it. Version 0.5.3 archives include the native file-lock dependency and its bundled support packages; install the complete archive.
+`agy-buzz-manage` installs a verified release archive into a versioned runtime directory and updates one existing Buzz harness. It never starts the adapter, reloads Buzz settings, or runs code from the archive while validating it. Archives from version 0.5.3 onward include the native file-lock dependency and its bundled support packages; install the complete archive.
+
+Before migrating from 0.4.x, read [the migration guide](MIGRATING_04_TO_05.md). Stop the affected agent and confirm its providers and pending steering have settled; back up the harness, dedicated hook/plugin configuration and durable stores. Do not point different live versions at the same stores.
 
 The command is a dry run by default. Obtain the expected SHA-256 from the trusted release publication or its separately authenticated checksum, then inspect the plan:
 
@@ -25,7 +27,9 @@ agy-buzz-manage install --archive agy-buzz-acp-0.5.8.tgz --sha256 <sha256> --roo
 
 The release is extracted into `root\versions\agy-buzz-acp-<version>`. The original harness bytes are preserved at the unique `harness.json.<timestamp>-<id>.backup` path shown in the result, with a matching `.receipt.json` association record. Its `id`, `label`, `command`, and `env` remain unchanged, and only the adapter entrypoint in `args[0]` is changed. Existing backup and receipt paths are never overwritten. If the harness changed after planning, the operation stops before writing.
 
-To roll back, ensure the previous adapter entrypoint recorded in the backup still exists, then inspect the rollback plan:
+**Steering hook is a separate configuration:** the manager changes only harness `args[0]`, not the hook command. After installation, update an enabled dedicated hook to the same versioned runtime; preserve its old configuration. Reload Settings → Agents → Check again and restart the affected agent. Verify the version announced at initialization and a delivered/checkpointed test turn.
+
+To roll back, stop the affected agent again, restore the matching previous hook configuration as well as the harness (or keep steering disabled for an older runtime without it), and preserve new-version state separately. The manager does not migrate state backward or undo external effects. Ensure the previous adapter entrypoint recorded in the backup still exists, then inspect the rollback plan:
 
 ```text
 agy-buzz-manage rollback --backup C:\Users\me\harness.json.<timestamp>-<id>.backup --harness C:\Users\me\harness.json
