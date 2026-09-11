@@ -28,7 +28,7 @@ async function harness(name, { uncertain = false } = {}) {
   Object.assign(env, { AGY_COMMAND: process.execPath, AGY_FAKE_SCRIPT: join(fixtures, 'fault-provider.mjs'), BUZZ_CLI_COMMAND: process.execPath, BUZZ_FAKE_SCRIPT: join(fixtures, 'fault-publisher.mjs'),
     AGY_SESSION_DIR: join(dir, 'sessions'), AGY_SESSION_OWNER: owner, AGY_OUTBOX_DIR: join(dir, 'outbox'), AGY_OUTBOX_OWNER: owner,
     BUZZ_RELAY_URL: 'wss://fault-probe.invalid', AGY_STEER_HOOK_CONFIGURED: '1', AGY_STEER_INJECTOR_EXCLUSIVE: '1', AGY_STEER_OWNER: owner, AGY_STEER_ROOT_DIR: join(dir, 'steering'),
-    PROBE_DIR: dir, PROBE_RUNTIME: runtime, PROBE_PUBLICATION_UNCERTAIN: uncertain ? '1' : '0' });
+    NODE_OPTIONS: `--import=${pathToFileURL(join(fixtures, 'process-trace.mjs')).href}`, PROBE_DIR: dir, PROBE_RUNTIME: runtime, PROBE_PUBLICATION_UNCERTAIN: uncertain ? '1' : '0' });
   const proc = spawn(process.execPath, [join(runtime, 'bin', 'agy-buzz-acp.js')], { env, cwd: dir, shell: false, stdio: ['pipe','pipe','pipe'] });
   let buffer = '', diagnostics = '', next = 1;
   const pending = new Map(), wire = [], commands = new Map();
@@ -125,7 +125,7 @@ async function check(name, fn, options) {
   }
   evidence.name = name; evidence.durationMs = Date.now() - began;
   checks.push(evidence); await writeFile(join(here, `results${suffix}.json`), JSON.stringify(checks, null, 2));
-  console.log(JSON.stringify({ name, verdict: evidence.verdict, durationMs: evidence.durationMs, error: evidence.error, adapterPid: evidence.adapterPid }));
+  console.log(JSON.stringify({ name, verdict: evidence.verdict, durationMs: evidence.durationMs, error: evidence.error, diagnostics: evidence.verdict === 'FAIL' ? evidence.diagnostics : undefined, bridgeStatus: evidence.verdict === 'FAIL' ? evidence.bridge?.status : undefined, adapterPid: evidence.adapterPid }));
 }
 
 for (const [name, delay] of [['confirmed-steering', 0], ['delayed-confirmation', 1200]]) {
