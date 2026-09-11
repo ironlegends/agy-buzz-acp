@@ -25,7 +25,7 @@ npm pack
 Install the generated archive, or an archive from a reviewed release:
 
 ```sh
-npm install --global ./agy-buzz-acp-0.4.0.tgz
+npm install --global ./agy-buzz-acp-0.4.1.tgz
 ```
 
 The package provides `agy-buzz-acp`, `agy-buzz-recover`, `agy-buzz-doctor`, and `agy-buzz-manage`. No npm dependencies are needed. No npm-registry publication is required to install the archive.
