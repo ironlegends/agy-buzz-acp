@@ -101,7 +101,8 @@ export class DeliveryOutbox {
     const names = await readdir(this.dir);
     const records = [];
     for (const name of names.filter((name) => name.endsWith('.json'))) {
-      const record = await this.get(name.slice(0, -5));
+      // Reconciliation scans live channels: never rewrite a concurrent publisher's checkpoint.
+      const record = await this.readRaw(name.slice(0, -5));
       if (record) records.push(record);
     }
     return records;

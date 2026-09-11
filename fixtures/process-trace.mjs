@@ -12,3 +12,15 @@ ChildProcess.prototype.spawn = function(options) {
   this.once('close', (code, signal) => log('close', `${code}/${signal}`));
   return result;
 };
+
+// Test-only filesystem failures: retain the original error and never log payloads.
+import fsPromises from 'node:fs/promises';
+import { syncBuiltinESMExports } from 'node:module';
+for (const name of ['rename', 'readFile']) {
+  const operation = fsPromises[name];
+  fsPromises[name] = (...args) => operation(...args).catch(error => {
+    process.stderr.write(`[probe-fs] operation=${name} code=${error.code}\n`);
+    throw error;
+  });
+}
+syncBuiltinESMExports();

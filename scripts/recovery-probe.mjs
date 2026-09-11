@@ -177,6 +177,8 @@ await check(name, async (app, evidence) => {
   const lastPrompt = (await app.trace()).filter((t) => t.kind === 'promptReceived').at(-1).message;
   assert.ok(lastPrompt.endsWith('NEW independent synthetic turn after the failure. Answer BASE only.'));
   assert.equal((await app.record()).conversationId, 'fault-probe-conversation');
+  const starts = (await app.trace()).filter(t => t.kind === 'providerStarted');
+  assert.ok(starts.every(t => t.cwd === starts[0].cwd && t.model === starts[0].model));
 });
 }
 await check('active-turn-not-reconciled', async (app, evidence) => {

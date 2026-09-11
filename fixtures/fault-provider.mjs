@@ -11,7 +11,7 @@ const emit = (event) => process.stdout.write(JSON.stringify(event) + '\n');
 const note = (kind, extra = {}) => appendFileSync(join(dir, 'trace.jsonl'), JSON.stringify({ kind, pid: process.pid, at: Date.now(), ...extra }) + '\n');
 const init = () => { if (!initialized) { initialized = true; emit({ event: 'init', conversation_id: conversationId }); } };
 const step = (step_type, step_index, extra = {}) => emit({ event: 'step_update', step_update: { step_type, step_index, conversation_id: conversationId, ...extra } });
-note('providerStarted', { conversationId, resumed: convArg >= 0 });
+note('providerStarted', { conversationId, resumed: convArg >= 0, cwd: process.cwd(), model: process.argv[process.argv.indexOf('--model') + 1] });
 if (convArg >= 0) init();
 createInterface({ input: process.stdin }).on('line', (line) => {
   const event = JSON.parse(line);
@@ -40,7 +40,7 @@ setInterval(() => {
   child.on('close', (code) => {
     busy = false;
     let result; try { result = JSON.parse(output); } catch { note('hookError', { reason: 'invalid output', code }); return; }
-    note('claimReturned', { code, injections: result.injectSteps?.length ?? 0, stderrLength: error.length });
+    note('claimReturned', { code, injections: result.injectSteps?.length ?? 0, stderrLength: error.length, hookDiagnostic: result.injectSteps?.length === 1 ? undefined : error });
     if (result.injectSteps?.length === 1 && message.confirmAfterMs >= 0) {
       setTimeout(() => { corrected = true; step('user_input', 2); step('agent_response', 3, { text_delta: 'CORRECTED' }); note('confirmationEmitted'); }, message.confirmAfterMs);
     }

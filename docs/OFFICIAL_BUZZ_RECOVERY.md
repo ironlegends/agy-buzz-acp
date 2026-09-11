@@ -112,3 +112,9 @@ Restoring a previously modified sidecar requires an exact version/digest check a
 ## Validation scope for the 0.5.8 candidate
 
 The fault matrix starts the actual adapter entry point and its packaged hook as subprocesses, with the real AgySession, native locks, durable state and outbox. Only the provider and publisher endpoints are synthetic. It includes missing/late confirmation, same-process recovery, concurrent work, and uncertain publication. Unit tests separately refuse recovery without a close event. These checks are not live Google/Buzz validation. The adapter does not internally replay old input, but Buzz queue retries are a separate source of incoming work and require independent end-to-end review.
+
+## Concurrent recovery and Windows file replacement
+
+Outbox listing is read-only with respect to delivery records, so a recovery scan on one channel cannot overwrite a concurrently completed publication on another. Live `inflight` records remain a recovery guard.
+
+Steering mutations wait at most two seconds for transient native-lock contention before failing closed. Teardown `block()` remains non-waiting. The protected mutation is never retried. On Windows only, an atomic file rename denied with EPERM/EACCES/EBUSY is retried for at most 500 ms; permanent denial remains an error. Only the uncommitted rename is retried, not a provider request, published message, or completed steering transition.
