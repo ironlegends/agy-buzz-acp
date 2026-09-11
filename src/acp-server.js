@@ -128,12 +128,11 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
     return { ownerId, rootDir, bridgeDir: join(rootDir, `channel-${bridgeKey}`), steeringSessionId };
   }
 
-  // Channels this process blocked itself and has not saved since. A block this
-  // adapter created is still terminal: the turn behind it may have started the
-  // provider or left an ambiguous external effect, and only an operator can settle
-  // that. Reconciliation is for the opposite case, a block nobody is left to answer
-  // for, found on disk by a process that did not write it.
-  const channelsBlockedHere = new Set();
+  // Channels whose current turn has invalidated durable state and has not yet
+  // finished. This is a liveness guard, not process-lifetime ownership: once the
+  // turn fully settles, a later prompt may reconcile under the durable outbox and
+  // channel-lock guards, exactly as a fresh adapter process would.
+  const channelsWithLiveBlock = new Set();
 
   // Durable half of the same question, and the only one that survives a restart: an
   // outbox record still `inflight` or `uncertain` means an external effect happened
@@ -172,10 +171,10 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
   //
   // `channelBusyElsewhere` is defence in depth and is not falsifiable by the current
   // suite. A live turn on the channel has already run `invalidate`, so it also sits in
-  // `channelsBlockedHere` until its `save`, and `save` is followed immediately by the
+  // `channelsWithLiveBlock` until its `save`, and `save` is followed immediately by the
   // removal with no injectable wait in between. It used to look falsifiable on the
   // steering path only because that harness ran without durable state, where
-  // `channelsBlockedHere` is never filled — the same illusion the disabled outbox
+  // `channelsWithLiveBlock` is never filled — the same illusion the disabled outbox
   // produced.
   //
   // It is kept because one race leaves it as the only guard. That race is reachable in
@@ -186,12 +185,17 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
   // `agy channel session is already owned` refusal, and the ownership lock is held per
   // process, not per session: `ownedChannels.has` short-circuits every later caller
   // (src/session-state.js:90). So a second session of this adapter, prompting the same
-  // channel between the first turn's `scope` and its `channelsBlockedHere.add`, passes
-  // the ownership check and finds the channel absent from `channelsBlockedHere`. Only
+  // channel between the first turn's `scope` and its `channelsWithLiveBlock.add`, passes
+  // the ownership check and finds the channel absent from `channelsWithLiveBlock`. Only
   // this condition then stops it from archiving a bridge that is still live. The
   // ordering above is measured; the race itself is not. Found by Sonnet's delta review.
+  const settleLiveBlock = (channelId, sessionId) => {
+    if (!channelId || channelBusyElsewhere(channelId, sessionId)) return;
+    channelsWithLiveBlock.delete(channelId);
+  };
+
   const reconciliationRefusal = async (channelId, sessionId) => {
-    if (channelsBlockedHere.has(channelId)) return 'this process wrote the block';
+    if (channelsWithLiveBlock.has(channelId)) return 'a live turn in this process owns the block';
     if (channelBusyElsewhere(channelId, sessionId)) return 'another turn holds the channel';
     return unsettledDeliveryRefusal(channelId);
   };
@@ -311,7 +315,7 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
             mcpCapabilities: { http: false, sse: false }
           },
           _meta: { steering: { supported: steeringCapability } },
-            agentInfo: { name: 'agy-buzz-acp', version: '0.5.6' }
+            agentInfo: { name: 'agy-buzz-acp', version: '0.5.7' }
         }));
         return;
       }
@@ -457,7 +461,7 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
               entry.bound = true;
             }
             await sessionState.invalidate(stateScope);
-            channelsBlockedHere.add(buzzContext.channelId);
+            channelsWithLiveBlock.add(buzzContext.channelId);
           }
           if (steeringCapability) await ensureSteering(entry, buzzContext.channelId);
           if (outbox?.configurationError) {
@@ -468,6 +472,7 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
           if (controller.signal.aborted) throw Object.assign(new Error('prompt cancelled'), { code: 'CANCELLED' });
         } catch (error) {
           activeTurns.delete(params.sessionId);
+          settleLiveBlock(buzzContext.channelId, params.sessionId);
           if (channelSessions.get(buzzContext.channelId) === params.sessionId) channelSessions.delete(buzzContext.channelId);
           if (stateScope) blockEntry(entry);
           throw error;
@@ -555,10 +560,10 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
                 await sessionState.save(stateScope, conversationId);
                 // Maintenance constraint: this removal stays immediately after the save,
                 // with no await in between. `reconciliationRefusal` reads
-                // `channelsBlockedHere` as the in-process proof that a live turn owns the
+                // `channelsWithLiveBlock` as the in-process proof that a live turn owns the
                 // channel. A gap between the two would show the channel as free while the
                 // record on disk is already settled, or the reverse if the order flipped.
-                channelsBlockedHere.delete(buzzContext.channelId);
+                channelsWithLiveBlock.delete(buzzContext.channelId);
                 turnSafe = true;
               } else {
                 blockEntry(entry);
@@ -599,6 +604,7 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
         } finally {
           if (providerStarted && !turnSafe) blockEntry(entry);
           activeTurns.delete(params.sessionId);
+          settleLiveBlock(buzzContext.channelId, params.sessionId);
         }
         return;
       }
