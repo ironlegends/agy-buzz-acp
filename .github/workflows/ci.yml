@@ -27,6 +27,6 @@ jobs:
         if: runner.os != 'Windows'
       # Concurrent test files spawn multiple cold PowerShell ACL helpers on
       # shared Windows runners. Keep each file's own concurrency tests active.
-      - run: npm test -- --test-concurrency=1
+      - run: node --import ./scripts/environment-support.js --test --test-concurrency=1
         if: runner.os == 'Windows'
       - run: node scripts/package-smoke.mjs
