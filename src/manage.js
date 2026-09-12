@@ -771,6 +771,21 @@ function journalSummary(journal, path) {
   };
 }
 
+function unsafeManagerReport(harnessPath, journalPath, kind) {
+  const path = kind === 'harness' ? harnessPath : journalPath;
+  return {
+    schemaVersion: JOURNAL_SCHEMA_VERSION,
+    status: 'indeterminate',
+    automaticRecovery: false,
+    harnessPath,
+    journal: { path: journalPath, present: null, valid: false, reason: 'unsafe-path' },
+    claims: [],
+    bounds: { journalBytes: MAX_JOURNAL_BYTES, fileBytes: MAX_MANAGER_FILE_BYTES, claims: MAX_MANAGER_CLAIMS },
+    unsafePath: { kind, path, reason: 'unsafe-path' },
+    recommendation: managerRecommendation(`manager ${kind} path is unsafe; do not restore`)
+  };
+}
+
 // Read-only manager inspection. It reports evidence and a conservative next
 // action; it never acquires the manager marker, relinks a claim, deletes a
 // staging file, or rewrites a journal.
@@ -780,8 +795,10 @@ export async function diagnoseManager({ harness, journal } = {}) {
   const harnessPath = resolve(harness);
   const journalPath = journal === undefined ? managerJournalPath(harnessPath) : resolve(journal);
   const lockPath = `${harnessPath}.agy-lock`;
-  await assertNoSymlinkAncestors(harnessPath);
-  await assertNoSymlinkAncestors(journalPath);
+  try { await assertNoSymlinkAncestors(harnessPath); }
+  catch { return unsafeManagerReport(harnessPath, journalPath, 'harness'); }
+  try { await assertNoSymlinkAncestors(journalPath); }
+  catch { return unsafeManagerReport(harnessPath, journalPath, 'journal'); }
   const claimsInfo = await inspectManagerClaims(harnessPath);
   const journalLoaded = await readBoundedJson(journalPath, MAX_JOURNAL_BYTES);
   const parsedJournal = validateManagerJournal(journalLoaded.value, journalPath);

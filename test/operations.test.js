@@ -69,6 +69,18 @@ async function setupManagerFixture(t) {
   return { root, harnessPath, archivePath, archiveBytes, oldEntrypoint };
 }
 
+async function createJunction(t, target) {
+  const parent = await mkdtemp(join(tmpdir(), 'agy-operations-junction-'));
+  const link = join(parent, 'runtime-junction');
+  t.after(() => rm(parent, { recursive: true, force: true }));
+  try { await symlink(target, link, 'junction'); }
+  catch (error) {
+    if (error?.code === 'EPERM') return null;
+    throw error;
+  }
+  return link;
+}
+
 test('the bounded subprocess helper stops a real synthetic command that never exits', async () => {
   const steering = await import('../src/steering.js');
   assert.equal(typeof steering.runBoundedSubprocess, 'function');
@@ -348,6 +360,45 @@ test('the manager diagnose CLI is read-only and does not print harness environme
   assert.equal(result.stdout.includes('synthetic'), false);
   assert.equal(result.stdout.includes('originalBytes'), false);
   assert.equal(typeof manage.parseManageArgs(['diagnose', '--harness', fixture.harnessPath]).action, 'string');
+});
+
+test('an unsafe harness parent returns an indeterminate report before reading target or claims', async (t) => {
+  const manage = await import('../src/manage.js');
+  const fixture = await setupManagerFixture(t);
+  const junction = await createJunction(t, fixture.root);
+  if (!junction) {
+    t.skip('the current Windows account cannot create junctions');
+    return;
+  }
+  await writeFile(join(fixture.root, 'harness.json.claim-ignored'), 'synthetic claim evidence\n');
+  const report = await manage.diagnoseManager({ harness: join(junction, 'harness.json') });
+  assert.equal(report.status, 'indeterminate');
+  assert.equal(report.automaticRecovery, false);
+  assert.equal(report.unsafePath.kind, 'harness');
+  assert.equal(report.unsafePath.reason, 'unsafe-path');
+  assert.deepEqual(report.claims, []);
+  assert.equal(Object.hasOwn(report, 'harness'), false);
+});
+
+test('an unsafe journal parent returns an indeterminate report before reading target or claims', async (t) => {
+  const manage = await import('../src/manage.js');
+  const fixture = await setupManagerFixture(t);
+  const junction = await createJunction(t, fixture.root);
+  if (!junction) {
+    t.skip('the current Windows account cannot create junctions');
+    return;
+  }
+  await writeFile(join(fixture.root, 'harness.json.claim-ignored'), 'synthetic claim evidence\n');
+  const report = await manage.diagnoseManager({
+    harness: fixture.harnessPath,
+    journal: join(junction, 'harness.json.agy-journal.json')
+  });
+  assert.equal(report.status, 'indeterminate');
+  assert.equal(report.automaticRecovery, false);
+  assert.equal(report.unsafePath.kind, 'journal');
+  assert.equal(report.unsafePath.reason, 'unsafe-path');
+  assert.deepEqual(report.claims, []);
+  assert.equal(Object.hasOwn(report, 'harness'), false);
 });
 
 test('the operations documentation records conservative manager and outbox compatibility contracts', async () => {
