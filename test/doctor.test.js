@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { mkdtemp, mkdir, rm, utimes, writeFile } from 'node:fs/promises';
+import { link, mkdtemp, mkdir, rm, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parseDoctorArgs, runDoctor, runDoctorCli } from '../src/doctor.js';
@@ -506,6 +506,67 @@ test('outbox diagnostics bind each record to its filename and configured owner',
   assert.equal(summary.records.invalid, 2);
   assert.equal(summary.statuses.invalid, 2);
   assert.equal(summary.records.uncertain, 0);
+});
+
+test('outbox diagnostics reject invalid UTF-8 through the bounded reader', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'agy-doctor-outbox-utf8-'));
+  const timestamp = '2026-09-11T00:00:00.000Z';
+  const record = { recoveryId: 'sample', owner: 'a'.repeat(64), channelId: '11111111-1111-4111-8111-111111111111',
+    replyTo: 'd'.repeat(64), content: 'invalid-utf8-marker', status: 'failed-before-start',
+    createdAt: timestamp, updatedAt: timestamp };
+  const bytes = Buffer.from(`${JSON.stringify(record)}\n`, 'utf8');
+  const marker = Buffer.from('invalid-utf8-marker', 'utf8');
+  const offset = bytes.indexOf(marker);
+  assert.notEqual(offset, -1);
+  bytes[offset] = 0xff;
+  await writeFile(join(root, 'sample.json'), bytes);
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  const summary = await inspectStateDirectory(root, { kind: 'outbox', expectedOwner: record.owner });
+
+  assert.equal(summary.scan.status, 'warn');
+  assert.equal(summary.records.ready, 0);
+  assert.equal(summary.records.invalid, 1);
+  assert.equal(summary.statuses.invalid, 1);
+  assert.equal(summary.statuses['failed-before-start'], 0);
+});
+
+test('outbox diagnostics reject records with more than one hardlink', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'agy-doctor-outbox-link-'));
+  const timestamp = '2026-09-11T00:00:00.000Z';
+  const record = { recoveryId: 'sample', owner: 'a'.repeat(64), channelId: '11111111-1111-4111-8111-111111111111',
+    replyTo: 'd'.repeat(64), content: 'private answer', status: 'failed-before-start',
+    createdAt: timestamp, updatedAt: timestamp };
+  const target = join(root, 'record-target.bin');
+  const recordPath = join(root, 'sample.json');
+  await writeFile(target, `${JSON.stringify(record)}\n`);
+  await link(target, recordPath);
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  const summary = await inspectStateDirectory(root, { kind: 'outbox', expectedOwner: record.owner });
+
+  assert.equal(summary.scan.status, 'warn');
+  assert.equal(summary.records.ready, 0);
+  assert.equal(summary.records.invalid, 1);
+  assert.equal(summary.statuses.invalid, 1);
+});
+
+test('outbox diagnostics do not fall back to readFile when fd reading is unavailable', async () => {
+  let reads = 0;
+  const fsImpl = {
+    lstat: async (path) => path === 'root'
+      ? { isDirectory: () => true, isSymbolicLink: () => false }
+      : { isFile: () => true, isDirectory: () => false, isSymbolicLink: () => false, size: 20 },
+    readdir: async () => ['sample.json'],
+    readFile: async () => { reads += 1; return JSON.stringify({ status: 'ready' }); }
+  };
+
+  const summary = await inspectStateDirectory('root', { kind: 'outbox', expectedOwner: 'a'.repeat(64), fsImpl });
+
+  assert.equal(summary.scan.status, 'warn');
+  assert.equal(summary.records.invalid, 1);
+  assert.equal(summary.statuses.invalid, 1);
+  assert.equal(reads, 0);
 });
 
 test('doctor argument parser keeps old flags and accepts explicit probes', () => {

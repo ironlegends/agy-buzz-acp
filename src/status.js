@@ -1,6 +1,6 @@
-import { access, lstat, readdir, readFile, stat } from 'node:fs/promises';
+import { access, lstat, open, readdir, readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
-import { validateOutboxRecord } from './delivery/outbox.js';
+import { readOutboxRecordFile } from './delivery/outbox.js';
 import { validateSessionRecord } from './session-state.js';
 
 export const MAX_STATE_ENTRIES = 1000;
@@ -79,7 +79,7 @@ async function lockState(dir, name, { fsImpl, processAliveImpl }) {
 export async function inspectStateDirectory(dir, {
   kind = 'outbox',
   expectedOwner = null,
-  fsImpl = { access, lstat, readdir, readFile, stat },
+  fsImpl = { access, lstat, open, readdir, readFile, stat },
   processAliveImpl = (pid) => {
     try { process.kill(pid, 0); return true; } catch (error) {
       if (error?.code === 'ESRCH') return false;
@@ -97,7 +97,7 @@ export async function inspectStateDirectory(dir, {
   };
   if (kind === 'outbox') summary.statuses = emptyStatuses();
   if (typeof dir !== 'string' || !dir.trim() || typeof fsImpl.lstat !== 'function' ||
-      typeof fsImpl.readdir !== 'function' || typeof fsImpl.readFile !== 'function') {
+      typeof fsImpl.readdir !== 'function' || (kind === 'session' && typeof fsImpl.readFile !== 'function')) {
     summary.scan.message = 'State contents are unavailable to this diagnostic';
     return summary;
   }
@@ -124,7 +124,9 @@ export async function inspectStateDirectory(dir, {
   }
   summary.entries.seen = names.length;
   const limit = Number.isInteger(maxEntries) && maxEntries > 0 ? maxEntries : MAX_STATE_ENTRIES;
-  const fileLimit = Number.isInteger(maxFileBytes) && maxFileBytes > 0 ? maxFileBytes : MAX_STATE_FILE_BYTES;
+  const fileLimit = Number.isInteger(maxFileBytes) && maxFileBytes > 0
+    ? Math.min(maxFileBytes, MAX_STATE_FILE_BYTES)
+    : MAX_STATE_FILE_BYTES;
   const inspectedNames = names.slice(0, limit);
   summary.entries.inspected = inspectedNames.length;
   summary.entries.truncated = names.length > inspectedNames.length;
@@ -152,12 +154,15 @@ export async function inspectStateDirectory(dir, {
       const details = await fsImpl.lstat(recordPath);
       if (!details || details?.isSymbolicLink?.() || details?.isFile?.() !== true) throw new Error('unsafe record');
       if (!Number.isFinite(details?.size) || details.size < 0 || details.size > fileLimit) throw new Error('record is outside the read bound');
-      const record = JSON.parse(await fsImpl.readFile(recordPath, 'utf8'));
-      if (kind === 'session') validateSessionRecord(record);
-      else {
-        if (!OUTBOX_FILENAME_RE.test(name)) throw new Error('invalid outbox filename');
-        if (!validateOutboxRecord(record) || record.recoveryId !== name.slice(0, -'.json'.length)) throw new Error('invalid outbox record binding');
-        if (typeof expectedOwner === 'string' && record.owner.toLowerCase() !== expectedOwner.toLowerCase()) throw new Error('outbox owner mismatch');
+      let record;
+      if (kind === 'session') {
+        record = JSON.parse(await fsImpl.readFile(recordPath, 'utf8'));
+        validateSessionRecord(record);
+      } else {
+        record = await readOutboxRecordFile(recordPath, name.slice(0, -'.json'.length), {
+          expectedOwner, fsImpl, maxBytes: fileLimit
+        });
+        if (!record) throw new Error('missing outbox record');
       }
       addRecord(summary, kind, record);
     } catch {

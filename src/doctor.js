@@ -1,6 +1,6 @@
 import { inspectSteeringDiagnostics } from './steering-diagnostics.js';
 import { constants as fsConstants, readFileSync } from 'node:fs';
-import { access, lstat, readdir, readFile, stat } from 'node:fs/promises';
+import { access, lstat, open, readdir, readFile, stat } from 'node:fs/promises';
 import { spawn as nodeSpawn } from 'node:child_process';
 import { posix, win32 } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -378,7 +378,7 @@ export async function runDoctor({
     agy: await inspectCommand('agy-command', 'AGY_COMMAND', 'agy', { env: diagnosticEnv, platform, fsImpl, checkCapabilities, cwd, timeoutMs: boundedTimeoutMs, spawnImpl, nodeSupported }),
     buzz: await inspectCommand('buzz-command', 'BUZZ_CLI_COMMAND', 'buzz', { env: diagnosticEnv, platform, fsImpl, checkCapabilities, cwd, timeoutMs: boundedTimeoutMs, spawnImpl, nodeSupported })
   };
-  const state = await inspectState(diagnosticEnv, { access, lstat, readdir, readFile, stat, ...fsImpl }, platform, { processAliveImpl });
+  const state = await inspectState(diagnosticEnv, { access, lstat, open, readdir, readFile, stat, ...fsImpl }, platform, { processAliveImpl });
   const checks = [nodeCheck,
     check('agy-command', commands.agy.status, commands.agy.message),
     check('buzz-command', commands.buzz.status, commands.buzz.message),
