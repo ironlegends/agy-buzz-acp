@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
-import { chmod, lstat, mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
+import { constants as fsConstants } from 'node:fs';
+import { chmod, lstat, mkdir, open, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
+import { TextDecoder } from 'node:util';
 import { acquireNativeLock } from '../native-lock.js';
 
 const OWNER_RE = /^[0-9a-f]{64}$/i;
@@ -139,20 +141,91 @@ export class DeliveryOutbox {
   async _readRecord(id) {
     if (!this.enabled || !validId(id)) return null;
     if (!await this._inspectDirectory()) return null;
+    const recordPath = this.path(id);
     let details;
-    try { details = await lstat(this.path(id)); }
+    try { details = await lstat(recordPath); }
     catch (error) {
       if (error?.code === 'ENOENT') return null;
       throw outboxError('agy outbox record could not be read', 'AGY_OUTBOX_READ');
     }
     if (details.isSymbolicLink()) throw outboxError('agy outbox record must not be a symlink', 'AGY_OUTBOX_SYMLINK');
     if (!details.isFile()) throw outboxError('agy outbox record is not a regular file', 'AGY_OUTBOX_TYPE');
+    if (details.nlink !== 1) throw outboxError('agy outbox record must have one directory entry', 'AGY_OUTBOX_LINK');
     if (!Number.isFinite(details.size) || details.size < 0 || details.size > MAX_RECORD_BYTES) {
       throw outboxError('agy outbox record exceeds the read limit', 'AGY_OUTBOX_BOUNDS');
     }
+
+    // Bind the read to the descriptor opened for the file observed above. The
+    // path is checked again after reading so replacement of the directory entry
+    // is reported instead of returning an unbound snapshot.
+    let handle;
+    let operationError;
     let record;
-    try { record = JSON.parse(await readFile(this.path(id), 'utf8')); }
-    catch { throw outboxError('agy outbox record is unreadable', 'AGY_OUTBOX_CORRUPT'); }
+    try {
+      const flags = fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0);
+      try { handle = await open(recordPath, flags); }
+      catch (error) {
+        if (error?.code === 'ENOENT') throw outboxError('agy outbox record changed while opening', 'AGY_OUTBOX_CHANGED');
+        throw error;
+      }
+      const opened = await handle.stat();
+      if (opened.isSymbolicLink()) throw outboxError('agy outbox record changed to a symlink', 'AGY_OUTBOX_CHANGED');
+      if (!opened.isFile()) throw outboxError('agy outbox record changed to a non-file', 'AGY_OUTBOX_CHANGED');
+      if (opened.nlink !== 1) throw outboxError('agy outbox record must have one directory entry', 'AGY_OUTBOX_LINK');
+      if (!Number.isFinite(opened.size) || opened.size < 0 || opened.size > MAX_RECORD_BYTES) {
+        throw outboxError('agy outbox record exceeds the read limit', 'AGY_OUTBOX_BOUNDS');
+      }
+      if (opened.dev !== details.dev || opened.ino !== details.ino || opened.size !== details.size) {
+        throw outboxError('agy outbox record changed while opening', 'AGY_OUTBOX_CHANGED');
+      }
+
+      const bytes = Buffer.alloc(MAX_RECORD_BYTES + 1);
+      let bytesRead = 0;
+      while (bytesRead < bytes.length) {
+        const result = await handle.read(bytes, bytesRead, bytes.length - bytesRead, bytesRead);
+        if (result.bytesRead === 0) break;
+        bytesRead += result.bytesRead;
+      }
+      if (bytesRead > MAX_RECORD_BYTES) {
+        throw outboxError('agy outbox record exceeds the read limit', 'AGY_OUTBOX_BOUNDS');
+      }
+
+      let after;
+      try { after = await lstat(recordPath); }
+      catch (error) {
+        if (error?.code === 'ENOENT') throw outboxError('agy outbox record changed while reading', 'AGY_OUTBOX_CHANGED');
+        throw error;
+      }
+      if (after.isSymbolicLink() || !after.isFile() || after.dev !== details.dev || after.ino !== details.ino) {
+        throw outboxError('agy outbox record changed while reading', 'AGY_OUTBOX_CHANGED');
+      }
+      if (after.nlink !== 1) throw outboxError('agy outbox record must have one directory entry', 'AGY_OUTBOX_LINK');
+      if (!Number.isFinite(after.size) || after.size < 0 || after.size > MAX_RECORD_BYTES) {
+        throw outboxError('agy outbox record exceeds the read limit', 'AGY_OUTBOX_BOUNDS');
+      }
+      if (after.size !== details.size || after.size !== opened.size) {
+        throw outboxError('agy outbox record changed while reading', 'AGY_OUTBOX_CHANGED');
+      }
+
+      let decoded;
+      try {
+        decoded = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true })
+          .decode(bytes.subarray(0, bytesRead));
+      } catch {
+        throw outboxError('agy outbox record is unreadable', 'AGY_OUTBOX_CORRUPT');
+      }
+      try { record = JSON.parse(decoded); }
+      catch { throw outboxError('agy outbox record is unreadable', 'AGY_OUTBOX_CORRUPT'); }
+    } catch (error) {
+      operationError = error;
+      if (error?.code?.startsWith('AGY_OUTBOX_')) throw error;
+      throw outboxError('agy outbox record is unreadable', 'AGY_OUTBOX_CORRUPT');
+    } finally {
+      try { await handle?.close(); }
+      catch (error) {
+        if (!operationError) throw outboxError('agy outbox record descriptor could not be closed', 'AGY_OUTBOX_READ');
+      }
+    }
     if (!validRecordShape(record)) throw outboxError('agy outbox record is invalid', 'AGY_OUTBOX_CORRUPT');
     if (record.recoveryId !== id) throw outboxError('agy outbox filename does not match its recovery id', 'AGY_OUTBOX_FILENAME');
     if (record.owner.toLowerCase() !== this.owner) {

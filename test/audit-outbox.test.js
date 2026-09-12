@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmod, mkdtemp, readdir, writeFile, readFile, rm, symlink } from 'node:fs/promises';
+import { chmod, link, mkdtemp, readdir, writeFile, readFile, rm, symlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { DeliveryOutbox, validateOutboxRecord } from '../src/delivery/outbox.js';
@@ -131,4 +131,31 @@ test('A09: a failed final acknowledgement write leaves the durable claim uncerta
   assert.equal(result.status, 'uncertain');
   assert.equal((await box.readRaw('sample')).status, 'uncertain');
   assert.equal((await readdir(box.dir)).some((name) => name.endsWith('.tmp')), false);
+});
+
+test('A10: records with invalid UTF-8 bytes are refused as corrupt', async (t) => {
+  const box = await fixture(t);
+  await box.begin(message);
+  const record = await box.readRaw('sample');
+  const bytes = Buffer.from(`${JSON.stringify({ ...record, content: 'invalid-utf8-marker' })}\n`, 'utf8');
+  const marker = Buffer.from('invalid-utf8-marker', 'utf8');
+  const offset = bytes.indexOf(marker);
+  assert.notEqual(offset, -1);
+  bytes[offset] = 0xff;
+  await writeFile(box.path('sample'), bytes);
+  await assert.rejects(box.readRaw('sample'), (error) => error.code === 'AGY_OUTBOX_CORRUPT');
+});
+
+test('A11: records with more than one hardlink are refused', async (t) => {
+  const box = await fixture(t);
+  await box.begin(message);
+  const recordPath = box.path('sample');
+  const hardlinkTarget = join(box.dir, 'hardlink-target.json');
+  const before = await readFile(recordPath);
+  await writeFile(hardlinkTarget, before);
+  await rm(recordPath);
+  await link(hardlinkTarget, recordPath);
+  await assert.rejects(box.readRaw('sample'), (error) => error.code === 'AGY_OUTBOX_LINK');
+  assert.deepEqual(await readFile(recordPath), before);
+  assert.deepEqual(await readFile(hardlinkTarget), before);
 });
