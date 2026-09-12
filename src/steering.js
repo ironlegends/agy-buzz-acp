@@ -14,6 +14,9 @@ export const STEERING_SCHEMA_VERSION = 1;
 export const MAX_STEERING_TEXT_LENGTH = 16_384;
 export const MAX_PENDING_STEERS = 8;
 export const STEERING_LOCK_WAIT_MS = 2_000;
+export function readBooleanFlag(value) {
+  return value === true || value === '1' || value === 'true';
+}
 
 const OWNER_RE = /^[0-9a-f]{64}$/i;
 const CHANNEL_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;

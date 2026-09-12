@@ -3,14 +3,20 @@ import { spawn } from 'node:child_process';
 const MAX_OUTPUT_BYTES = 64 * 1024;
 const COMMAND_TIMEOUT_MS = 10000;
 
-function findPubkey(value) {
-  if (!value || typeof value !== 'object') return null;
-  if (typeof value.pubkey === 'string' && /^[0-9a-f]{64}$/i.test(value.pubkey)) return value.pubkey.toLowerCase();
-  for (const child of Object.values(value)) {
-    const found = findPubkey(child);
-    if (found) return found;
+function collectPubkeys(value, found = new Set(), seen = new Set()) {
+  if (!value || typeof value !== 'object' || seen.has(value)) return found;
+  seen.add(value);
+  if (typeof value.pubkey === 'string' && /^[0-9a-f]{64}$/i.test(value.pubkey)) {
+    found.add(value.pubkey.toLowerCase());
   }
-  return null;
+  for (const child of Object.values(value)) collectPubkeys(child, found, seen);
+  return found;
+}
+
+function findPubkey(value) {
+  const pubkeys = [...collectPubkeys(value)];
+  if (pubkeys.length > 1) throw new Error('ambiguous public keys');
+  return pubkeys[0] ?? null;
 }
 
 export function getBuzzPublicKey({ command = 'buzz', prefixArgs = [], spawnFn = spawn, timeoutMs = COMMAND_TIMEOUT_MS, maxOutputBytes = MAX_OUTPUT_BYTES } = {}) {
@@ -46,7 +52,11 @@ export function getBuzzPublicKey({ command = 'buzz', prefixArgs = [], spawnFn = 
         const pubkey = findPubkey(JSON.parse(output.trim()));
         if (!pubkey) throw new Error('missing public key');
         finish(null, pubkey);
-      } catch { finish(new Error('Buzz identity lookup returned invalid JSON')); }
+      } catch (error) {
+        finish(new Error(error?.message === 'ambiguous public keys'
+          ? 'Buzz identity lookup returned ambiguous public keys'
+          : 'Buzz identity lookup returned invalid JSON'));
+      }
     });
     timer = setTimeout(() => {
       try { child.kill(); } catch { /* failure remains bounded */ }

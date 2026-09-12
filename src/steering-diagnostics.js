@@ -4,7 +4,7 @@ import { constants } from 'node:fs';
 import { lstat, readdir, open } from 'node:fs/promises';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
-import { validateSteeringSnapshot } from './steering.js';
+import { validateSteeringSnapshot, readBooleanFlag } from './steering.js';
 const OWNER = /^[a-f0-9]{64}$/i;
 const LIMIT = 256 * 1024;
 export const MAX_STEERING_DIAGNOSTIC_ENTRIES = 1000;
@@ -43,7 +43,7 @@ export async function inspectSteeringDiagnostics(env, { fsImpl = {}, maxEntries 
   const fs = { lstat, readdir, open, ...fsImpl };
   const configured = ['AGY_STEER_HOOK_CONFIGURED','AGY_STEER_INJECTOR_EXCLUSIVE','AGY_STEER_OWNER','AGY_STEER_ROOT_DIR'].some(k => Boolean(env[k]));
   const owner = env.AGY_STEER_OWNER ?? env.AGY_SESSION_OWNER;
-  const enabled = env.AGY_STEER_HOOK_CONFIGURED === '1' && env.AGY_STEER_INJECTOR_EXCLUSIVE === '1' && OWNER.test(owner ?? '');
+  const enabled = readBooleanFlag(env.AGY_STEER_HOOK_CONFIGURED) && readBooleanFlag(env.AGY_STEER_INJECTOR_EXCLUSIVE) && OWNER.test(owner ?? '');
   const automaticRecoveryConfigured = Boolean(enabled && env.AGY_SESSION_DIR && env.AGY_OUTBOX_DIR && env.BUZZ_RELAY_URL &&
     OWNER.test(env.AGY_SESSION_OWNER ?? '') && OWNER.test(env.AGY_OUTBOX_OWNER ?? '') &&
     env.AGY_SESSION_OWNER.toLowerCase() === owner.toLowerCase() && env.AGY_OUTBOX_OWNER.toLowerCase() === owner.toLowerCase());
@@ -52,7 +52,7 @@ export async function inspectSteeringDiagnostics(env, { fsImpl = {}, maxEntries 
     bridges:{ ready:0, blocked:0, invalid:0, archived:0 }, scan:{ inspected:0, truncated:false }, guidance:'' };
   if (!configured) return result;
   if (!enabled) {
-    if (env.AGY_STEER_HOOK_CONFIGURED === '1' || env.AGY_STEER_INJECTOR_EXCLUSIVE === '1') {
+    if (readBooleanFlag(env.AGY_STEER_HOOK_CONFIGURED) || readBooleanFlag(env.AGY_STEER_INJECTOR_EXCLUSIVE)) {
       result.status='fail'; result.message='Steering requires both opt-in flags and a valid public owner';
     }
     return result;

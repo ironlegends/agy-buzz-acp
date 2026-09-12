@@ -60,3 +60,11 @@ test('injected identity child malformed output does not select an identity', asy
   process.stdout.write('{'); process.emit('close', 0);
   await assert.rejects(pending, { message: 'Buzz identity lookup returned invalid JSON' });
 });
+
+test('identity refuses distinct nested public keys instead of selecting the first', async () => {
+  const process = child();
+  const pending = getBuzzPublicKey({ spawnFn: () => process });
+  process.stdout.write(JSON.stringify({ identities: [{ pubkey: owner }, { pubkey: 'cd'.repeat(32) }] }));
+  process.emit('close', 0);
+  await assert.rejects(pending, /ambiguous|multiple public keys/i);
+});

@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { createLineDecoder, createByteBudget, FRAME_TOO_LARGE, FRAME_INVALID_UTF8, resolveFrameLimits } from './frame-codec.js';
 
 export const PINNED_MODEL = 'gemini-3.8-flash-high';
 export const MAX_MODEL_LENGTH = 128;
@@ -97,7 +98,19 @@ export class AgySession {
   constructor({ command = 'agy', prefixArgs = [], cwd = process.cwd(), systemPrompt,
     model = process.env.AGY_MODEL ?? PINNED_MODEL, spawnFn = spawn, nowFn = Date.now,
     resumeTimeoutMs = RESUME_INIT_TIMEOUT_MS, retireTimeoutMs = PROVIDER_RETIRE_TIMEOUT_MS,
-    steeringCoordinator = null, steeringTimeoutMs = STEERING_CLAIM_TIMEOUT_MS } = {}) {
+    steeringCoordinator = null, steeringTimeoutMs = STEERING_CLAIM_TIMEOUT_MS, frameLimits = {} } = {}) {
+    const suppliedLimits = frameLimits && typeof frameLimits === 'object' && !Array.isArray(frameLimits) ? frameLimits : {};
+    for (const name of ['maxFrameBytes', 'maxResponseBytes', 'maxDeferredBytes', 'maxDeferredEvents']) {
+      if (Object.prototype.hasOwnProperty.call(suppliedLimits, name) &&
+          (!Number.isSafeInteger(suppliedLimits[name]) || suppliedLimits[name] < 1)) {
+        throw new TypeError(`${name} must be a positive integer`);
+      }
+    }
+    const resolvedLimits = resolveFrameLimits(suppliedLimits);
+    this.maxFrameBytes = resolvedLimits.maxFrameBytes;
+    this.maxResponseBytes = resolvedLimits.maxResponseBytes;
+    this.maxDeferredBytes = resolvedLimits.maxDeferredBytes;
+    this.maxDeferredEvents = resolvedLimits.maxDeferredEvents;
     this.command = command;
     this.prefixArgs = prefixArgs;
     this.cwd = cwd;
@@ -122,7 +135,7 @@ export class AgySession {
     this.child = null;
     this.pending = null;
     this.lastPending = null;
-    this.buffer = '';
+    this.lineDecoder = createLineDecoder({ maxLineBytes: this.maxFrameBytes });
     this.contextLost = false;
     this.conversationEstablished = false;
     this.conversationId = null;
@@ -158,7 +171,9 @@ export class AgySession {
       const pending = { resolve, reject, text, onText: typeof onText === 'function' ? onText : () => {},
         onActivity: typeof onActivity === 'function' ? onActivity : () => {}, emittedText: '', resuming: false,
         rotating: false, turnId: ++this.turnSequence, activeTools: new Map(), startedAt: null, providerTerminal: false,
-        segments: [''], segmentIndex: 0, injectedCount: 0, steerIds: new Set(), steerWaiters: new Map(),
+        segments: [''], segmentIndex: 0, injectedCount: 0,
+        steerIds: new Set(), steerWaiters: new Map(),
+        responseBudget: createByteBudget(this.maxResponseBytes), deferredBudget: createByteBudget(this.maxDeferredBytes),
         steerOperations: new Set(), steeringTimers: new Map(), steeringClaimPollers: new Map(), observationInFlight: false, deferredUserInput: null, deferredEvents: [], pendingResult: null, steeringFailure: null,
         providerInitSeen: false, initialUserInputExpected: false, initialUserInputSeen: false };
       this.pending = pending;
@@ -375,7 +390,7 @@ export class AgySession {
     if (this.child === child) this.child = null;
     this.childSteeringEnabled = false;
     this.childStartedAt = null;
-    this.buffer = '';
+    this.lineDecoder = createLineDecoder({ maxLineBytes: this.maxFrameBytes });
     this.sentSystemPrompt = false;
     this.awaitingResumeInit = false;
     if (this.resumeTimer) clearTimeout(this.resumeTimer);
@@ -450,7 +465,7 @@ ${pending.text ?? ''}`
     const child = this.child;
     this.child = null;
     this.childSteeringEnabled = false;
-    this.buffer = '';
+    this.lineDecoder = createLineDecoder({ maxLineBytes: this.maxFrameBytes });
     this.sentSystemPrompt = false;
     this.awaitingResumeInit = false;
     if (this.resumeTimer) clearTimeout(this.resumeTimer);
@@ -475,7 +490,7 @@ ${pending.text ?? ''}`
       this.rejectSteeringWaiters(pending, wrapperError('agy session closed'));
       this.finishPending(wrapperError('agy session closed'));
     }
-    this.buffer = '';
+    this.lineDecoder = createLineDecoder({ maxLineBytes: this.maxFrameBytes });
     this.childStartedAt = null;
     if (child) stopChild(child);
   }
@@ -522,8 +537,17 @@ ${pending.text ?? ''}`
       env: providerEnv,
       stdio: ['pipe', 'pipe', 'ignore']
     });
-    child.stdout.setEncoding('utf8');
     child.stdout.on('data', (chunk) => this.consume(chunk, child));
+    child.stdout.on('end', () => {
+      if (this.child !== child) return;
+      const truncated = this.lineDecoder.finish();
+      if (truncated) {
+        const message = truncated.error?.code === FRAME_INVALID_UTF8
+          ? 'agy provider stream contains invalid UTF-8'
+          : 'agy provider stream ended with an incomplete line';
+        this.failProviderEvent(wrapperError(message));
+      }
+    });
     child._agyResume = resume;
     this.childStartedAt = startedAt;
     child._agyStopRequested = false;
@@ -543,7 +567,7 @@ ${pending.text ?? ''}`
       }
       this.child = null;
       this.childSteeringEnabled = false;
-      this.buffer = '';
+      this.lineDecoder = createLineDecoder({ maxLineBytes: this.maxFrameBytes });
       this.sentSystemPrompt = false;
       this.awaitingResumeInit = false;
       this.resumeEligible = false;
@@ -563,7 +587,7 @@ ${pending.text ?? ''}`
       }
       this.child = null;
       this.childSteeringEnabled = false;
-      this.buffer = '';
+      this.lineDecoder = createLineDecoder({ maxLineBytes: this.maxFrameBytes });
       this.sentSystemPrompt = false;
       this.awaitingResumeInit = false;
       this.resumeEligible = false;
@@ -580,7 +604,7 @@ ${pending.text ?? ''}`
       this.child = null;
       this.childSteeringEnabled = false;
       this.childStartedAt = null;
-      this.buffer = '';
+      this.lineDecoder = createLineDecoder({ maxLineBytes: this.maxFrameBytes });
       this.sentSystemPrompt = false;
       this.awaitingResumeInit = false;
       if (this.resumeTimer) clearTimeout(this.resumeTimer);
@@ -608,98 +632,137 @@ ${pending.text ?? ''}`
 
   consume(chunk, sourceChild = this.child) {
     if (sourceChild !== this.child) return;
-    this.buffer += chunk;
-    let index;
-    while ((index = this.buffer.indexOf('\n')) >= 0) {
-      const line = this.buffer.slice(0, index);
-      this.buffer = this.buffer.slice(index + 1);
-      if (!line.trim()) continue;
-      let event;
-      try {
-        event = JSON.parse(line);
-      } catch {
-        this.failProviderEvent(wrapperError('agy returned invalid stream JSON'));
+    for (const result of this.lineDecoder.push(chunk)) {
+      if (result.error) {
+        const message = result.error.code === FRAME_TOO_LARGE
+          ? 'agy provider stream line exceeded the byte limit'
+          : result.error.code === FRAME_INVALID_UTF8
+            ? 'agy provider stream contains invalid UTF-8'
+            : 'agy provider stream ended with an incomplete line';
+        this.failProviderEvent(wrapperError(message));
         return;
       }
-      if (sourceChild._agyResume && this.awaitingResumeInit && event.event !== 'init') {
-        this.failProviderEvent(wrapperError('agy resume requires matching init before provider events'));
-        return;
+      if (!this.processProviderLine(result.line, sourceChild)) return;
+    }
+  }
+
+  // Returns false when processing must stop for this chunk (the pending turn was
+  // just failed or finished), true to continue with the next buffered line.
+  processProviderLine(line, sourceChild) {
+    if (!line.trim()) return true;
+    let event;
+    try {
+      event = JSON.parse(line);
+    } catch {
+      this.failProviderEvent(wrapperError('agy returned invalid stream JSON'));
+      return false;
+    }
+    if (event === null || typeof event !== 'object' || Array.isArray(event) || typeof event.event !== 'string') {
+      this.failProviderEvent(wrapperError('agy returned an invalid stream event shape'));
+      return false;
+    }
+    if (event.event === 'step_update' && (!event.step_update || typeof event.step_update !== 'object' || Array.isArray(event.step_update))) {
+      this.failProviderEvent(wrapperError('agy provider step_update payload is invalid'));
+      return false;
+    }
+    if (sourceChild._agyResume && this.awaitingResumeInit && event.event !== 'init') {
+      this.failProviderEvent(wrapperError('agy resume requires matching init before provider events'));
+      return false;
+    }
+    const step = event.event === 'step_update' ? event.step_update : null;
+    const isInit = event.event === 'init';
+    if (this.pending && !isInit && this.steeringBindingPending) {
+      if (this.hasUnsettledSteering(this.pending) && (event.event === 'result' || event.event === 'error')) {
+        void this.failSteeringPending(this.pending, steeringError('agy provider terminated before steering conversation binding'));
+        return false;
       }
-      const step = event.event === 'step_update' ? event.step_update : null;
-      const isInit = event.event === 'init';
-      if (this.pending && !isInit && this.steeringBindingPending) {
-        if (this.hasUnsettledSteering(this.pending) && (event.event === 'result' || event.event === 'error')) {
-          void this.failSteeringPending(this.pending, steeringError('agy provider terminated before steering conversation binding'));
-          return;
-        }
-        this.pending.deferredEvents.push(event);
-        continue;
+      return this.pushDeferredEvent(this.pending, event);
+    }
+    const stepIndex = boundedStepIndex(step?.step_index);
+    if (stepIndex !== null) this.providerStepWatermark = Math.max(this.providerStepWatermark, stepIndex);
+    const isUserInput = event.event === 'step_update' && step?.step_type === 'user_input';
+    if (this.pending && !isUserInput && (this.pending.deferredUserInput || this.pending.observationInFlight)) {
+      return this.pushDeferredEvent(this.pending, event);
+    }
+    if (isUserInput) {
+      if (!this.validateSteeringEventConversation(event)) {
+        void this.failSteeringPending(this.pending, steeringError('agy steering provider user_input is ambiguous'));
+        return false;
       }
-      const stepIndex = boundedStepIndex(step?.step_index);
-      if (stepIndex !== null) this.providerStepWatermark = Math.max(this.providerStepWatermark, stepIndex);
-      const isUserInput = event.event === 'step_update' && step?.step_type === 'user_input';
-      if (this.pending && !isUserInput && (this.pending.deferredUserInput || this.pending.observationInFlight)) {
-        this.pending.deferredEvents.push(event);
-        continue;
+      if (this.isInitialProviderUserInput(this.pending)) return true;
+      this.handleUserInput(step);
+      return true;
+    }
+    if (!this.validateEventConversation(event, sourceChild)) return false;
+    if (event.event === 'init') {
+      if (this.pending?.providerInitSeen) {
+        this.failProviderEvent(steeringError('agy provider repeated init during active prompt'));
+        return false;
       }
-      if (isUserInput) {
-        if (!this.validateSteeringEventConversation(event)) {
-          void this.failSteeringPending(this.pending, steeringError('agy steering provider user_input is ambiguous'));
-          return;
-        }
-        if (this.isInitialProviderUserInput(this.pending)) continue;
-        this.handleUserInput(step);
-        continue;
+      if (this.pending) {
+        this.pending.providerInitSeen = true;
       }
-      if (!this.validateEventConversation(event, sourceChild)) return;
-      if (event.event === 'init') {
-        if (this.pending?.providerInitSeen) {
-          this.failProviderEvent(steeringError('agy provider repeated init during active prompt'));
-          return;
+      this.beginSteeringBinding(this.conversationId);
+      if (sourceChild._agyResume) {
+        this.awaitingResumeInit = false;
+        if (this.resumeTimer) clearTimeout(this.resumeTimer);
+        this.resumeTimer = null;
+        this.sendPendingPrompt();
+      }
+    } else if (event.event === 'step_update' && this.pending) {
+      const type = typeof step?.step_type === 'string' ? step.step_type : 'agent_response';
+      if (type === 'agent_response' && typeof step.text_delta === 'string') {
+        return this.appendResponseText(this.pending, step.text_delta);
+      } else if (type === 'tool') {
+        this.emitToolActivity(step);
+      }
+    } else if (event.event === 'response' && typeof event.response?.text === 'string' && this.pending) {
+      return this.appendResponseText(this.pending, event.response.text);
+    } else if (event.event === 'result' && this.pending) {
+      const result = event.result;
+      if (result?.status === 'SUCCESS') {
+        this.conversationEstablished = true;
+        this.lastTurnSucceeded = true;
+        this.lastTurnIdConfirmed = this.turnIdsCoherent && Boolean(this.conversationId &&
+          typeof result.conversation_id === 'string' && result.conversation_id === this.conversationId);
+        if (!this.pending.emittedText && typeof result.response === 'string' && this.pending.injectedCount === 0) {
+          if (!this.appendResponseText(this.pending, result.response)) return false;
         }
-        if (this.pending) {
-          this.pending.providerInitSeen = true;
-        }
-        this.beginSteeringBinding(this.conversationId);
-        if (sourceChild._agyResume) {
-          this.awaitingResumeInit = false;
-          if (this.resumeTimer) clearTimeout(this.resumeTimer);
-          this.resumeTimer = null;
-          this.sendPendingPrompt();
-        }
-      } else if (event.event === 'step_update' && this.pending) {
-        const type = typeof step?.step_type === 'string' ? step.step_type : 'agent_response';
-        if (type === 'agent_response' && typeof step.text_delta === 'string') {
-          this.pending.emittedText += step.text_delta;
-          this.pending.segments[this.pending.segmentIndex] += step.text_delta;
-          this.pending.onText(step.text_delta);
-        } else if (type === 'tool') {
-          this.emitToolActivity(step);
-        }
-      } else if (event.event === 'response' && typeof event.response?.text === 'string' && this.pending) {
-        this.pending.emittedText += event.response.text;
-        this.pending.segments[this.pending.segmentIndex] += event.response.text;
-        this.pending.onText(event.response.text);
-      } else if (event.event === 'result' && this.pending) {
-        const result = event.result;
-        if (result?.status === 'SUCCESS') {
-          this.conversationEstablished = true;
-          this.lastTurnSucceeded = true;
-          this.lastTurnIdConfirmed = this.turnIdsCoherent && Boolean(this.conversationId &&
-            typeof result.conversation_id === 'string' && result.conversation_id === this.conversationId);
-          if (!this.pending.emittedText && typeof result.response === 'string' && this.pending.injectedCount === 0) {
-            this.pending.onText(result.response);
-          }
-          this.pending.pendingResult = { result };
-          this.maybeFinishResult(this.pending);
-        }
-        else {
-          this.lastTurnSucceeded = false;
-          this.pending.pendingResult = { result };
-          this.maybeFinishResult(this.pending);
-        }
+        this.pending.pendingResult = { result };
+        this.maybeFinishResult(this.pending);
+      }
+      else {
+        this.lastTurnSucceeded = false;
+        this.pending.pendingResult = { result };
+        this.maybeFinishResult(this.pending);
       }
     }
+    return true;
+  }
+
+  pushDeferredEvent(pending, event) {
+    if (pending.deferredEvents.length >= this.maxDeferredEvents) {
+      this.failProviderEvent(wrapperError('agy provider deferred events exceeded the limit'));
+      return false;
+    }
+    const encoded = JSON.stringify(event);
+    if (!pending.deferredBudget.add(`${encoded}\n`)) {
+      this.failProviderEvent(wrapperError('agy provider deferred events exceeded the byte limit'));
+      return false;
+    }
+    pending.deferredEvents.push(event);
+    return true;
+  }
+
+  appendResponseText(pending, delta) {
+    if (!pending.responseBudget.add(delta)) {
+      this.failProviderEvent(wrapperError('agy provider response exceeded the size limit'));
+      return false;
+    }
+    pending.emittedText += delta;
+    pending.segments[pending.segmentIndex] += delta;
+    pending.onText(delta);
+    return true;
   }
 
   hasUnsettledSteering(pending) {
@@ -810,6 +873,11 @@ ${pending.text ?? ''}`
       return;
     }
     if (pending.steerOperations.size > 0) {
+      const encoded = JSON.stringify(step);
+      if (!pending.deferredBudget.add(`${encoded}\n`)) {
+        this.failProviderEvent(wrapperError('agy provider deferred events exceeded the byte limit'));
+        return;
+      }
       pending.deferredUserInput = step;
       void Promise.allSettled([...pending.steerOperations]).then(() => {
         const deferred = pending.deferredUserInput;
@@ -994,7 +1062,7 @@ ${pending.text ?? ''}`
     const child = this.child;
     this.child = null;
     this.childSteeringEnabled = false;
-    this.buffer = '';
+    this.lineDecoder = createLineDecoder({ maxLineBytes: this.maxFrameBytes });
     this.sentSystemPrompt = false;
     if (child) stopChild(child);
     this.finishPending(error);

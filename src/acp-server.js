@@ -9,7 +9,8 @@ import { createConfiguredOutbox } from './delivery/outbox.js';
 import { getBuzzPublicKey } from './delivery/identity.js';
 import { ownershipFailureReason, createConfiguredSessionState } from './session-state.js';
 import { listModels, modelConfigOptions } from './models.js';
-import { createSteeringCoordinator, inspectSteeringBridge, reconcileSteeringBridge, MAX_STEERING_TEXT_LENGTH } from './steering.js';
+import { createSteeringCoordinator, inspectSteeringBridge, reconcileSteeringBridge, MAX_STEERING_TEXT_LENGTH, readBooleanFlag } from './steering.js';
+import { attachLineDecoder, FRAME_TOO_LARGE, FRAME_INVALID_UTF8, resolveFrameLimits } from './frame-codec.js';
 
 const JSON_RPC = '2.0';
 const TERMINAL_SESSION_CONTEXT_MESSAGE = 'agy session context lost; resume unsupported';
@@ -17,13 +18,9 @@ const STEERING_RPC_CODE = -32004;
 const STEERING_UNCERTAIN_MESSAGE = 'agy steering outcome is uncertain';
 const OWNER_RE = /^[0-9a-f]{64}$/i;
 
-function envFlag(value) {
-  return value === '1' || value === 'true';
-}
-
 function steeringConfiguration(env = process.env, override = {}) {
-  const hookConfigured = override.hookConfigured ?? envFlag(env.AGY_STEER_HOOK_CONFIGURED);
-  const injectorExclusive = override.injectorExclusive ?? envFlag(env.AGY_STEER_INJECTOR_EXCLUSIVE);
+  const hookConfigured = readBooleanFlag(override.hookConfigured ?? env.AGY_STEER_HOOK_CONFIGURED);
+  const injectorExclusive = readBooleanFlag(override.injectorExclusive ?? env.AGY_STEER_INJECTOR_EXCLUSIVE);
   const ownerId = override.ownerId ?? env.AGY_STEER_OWNER ?? env.AGY_SESSION_OWNER;
   return {
     hookConfigured,
@@ -83,7 +80,9 @@ export function describePromptShape(prompt) {
   return `blocks=${prompt.length} ${blocks.join(' ; ')}`;
 }
 
-export function createAcpServer({ input = process.stdin, output = process.stdout, diagnostics = process.stderr, sessionFactory, publisherFactory, outboxFactory, identityFactory, sessionStateFactory, modelCatalogFactory, steeringFactory, steeringConfig, steeringSupported } = {}) {
+export function createAcpServer({ input = process.stdin, output = process.stdout, diagnostics = process.stderr, sessionFactory, publisherFactory, outboxFactory, identityFactory, sessionStateFactory, modelCatalogFactory, steeringFactory, steeringConfig, steeringSupported, frameLimits = {} } = {}) {
+  const resolvedFrameLimits = resolveFrameLimits(frameLimits);
+  const maxFrameBytes = resolvedFrameLimits.maxFrameBytes;
   const sessions = new Map();
   const activeTurns = new Map();
   const recoveries = new Map();
@@ -92,7 +91,8 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
   const activeHandles = new Set();
   const makeSession = sessionFactory ?? ((options) => new AgySession({ ...options,
     command: process.env.AGY_COMMAND || 'agy',
-    prefixArgs: process.env.AGY_FAKE_SCRIPT ? [process.env.AGY_FAKE_SCRIPT] : []
+    prefixArgs: process.env.AGY_FAKE_SCRIPT ? [process.env.AGY_FAKE_SCRIPT] : [],
+    frameLimits: resolvedFrameLimits
   }));
   const modelCommand = process.env.AGY_COMMAND || 'agy';
   const modelPrefixArgs = process.env.AGY_FAKE_SCRIPT ? [process.env.AGY_FAKE_SCRIPT] : [];
@@ -118,8 +118,6 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
   let publisher;
   let initialized = false;
   let closing = false;
-  let buffer = '';
-
   function steeringLocation(channelId) {
     const ownerId = resolvedSteeringConfig.ownerId ?? sessionState?.owner;
     const rootDir = resolvedSteeringConfig.rootDir ?? join(tmpdir(), 'agy-buzz-steering');
@@ -272,12 +270,24 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
   });
 
   async function handle(message) {
-    const id = message.id;
-    if (message.jsonrpc !== JSON_RPC || typeof message.method !== 'string') {
-      if (id !== undefined) write(rpcError(id, -32600, 'invalid JSON-RPC request'));
+    if (message === null || typeof message !== 'object' || Array.isArray(message)) {
+      write(rpcError(null, -32600, 'invalid JSON-RPC request'));
       return;
     }
-    const params = message.params && typeof message.params === 'object' ? message.params : {};
+    const idPresent = Object.prototype.hasOwnProperty.call(message, 'id');
+    const rawId = message.id;
+    const idValid = !idPresent || rawId === null || typeof rawId === 'string' ||
+      (typeof rawId === 'number' && Number.isFinite(rawId));
+    if (!idValid) {
+      write(rpcError(null, -32600, 'invalid JSON-RPC request id'));
+      return;
+    }
+    const id = idPresent ? rawId : undefined;
+    if (message.jsonrpc !== JSON_RPC || typeof message.method !== 'string') {
+      write(rpcError(id, -32600, 'invalid JSON-RPC request'));
+      return;
+    }
+    const params = message.params && typeof message.params === 'object' && !Array.isArray(message.params) ? message.params : {};
     try {
       if (closing) throw Object.assign(new Error('agy adapter is closed'), { rpcCode: -32000, rpcMessage: 'agy adapter is closed' });
       if (message.method === 'initialize') {
@@ -332,7 +342,8 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
           sessionId,
           cwd: params.cwd,
           systemPrompt,
-          model: requestedModel
+          model: requestedModel,
+          frameLimits: resolvedFrameLimits
         });
         session.setModelCatalog?.(catalog);
         sessions.set(sessionId, { session, sessionId, cwd: params.cwd,
@@ -445,7 +456,7 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
               // Do not reset contextLost on the failed object or reuse its buffers.
               // Rebind only the association validated above, never an unconfirmed ID.
               const replacement = makeSession({ sessionId: params.sessionId, cwd: entry.cwd,
-                model: entry.model, systemPrompt: entry.systemPrompt });
+                model: entry.model, systemPrompt: entry.systemPrompt, frameLimits: resolvedFrameLimits });
               if (!replacement || replacement === session) throw steeringRpcError('agy replacement session is unavailable');
               replacement.setModelCatalog?.(entry.modelCatalog);
               entry.session = session = replacement;
@@ -654,20 +665,27 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
     }
   }
 
-  input.setEncoding('utf8');
-  input.on('data', (chunk) => {
-    buffer += chunk;
-    let index;
-    while ((index = buffer.indexOf('\n')) >= 0) {
-      const line = buffer.slice(0, index);
-      buffer = buffer.slice(index + 1);
-      if (!line.trim()) continue;
+  attachLineDecoder(input, {
+    maxLineBytes: maxFrameBytes,
+    onLine: (line) => {
+      if (!line.trim()) return;
       let message;
       try { message = JSON.parse(line); }
-      catch { report('invalid JSON input'); write(rpcError(null, -32700, 'parse error')); continue; }
+      catch { report('invalid JSON input'); write(rpcError(null, -32700, 'parse error')); return; }
       const task = handle(message);
       activeHandles.add(task);
-      void task.finally(() => activeHandles.delete(task));
+      void task.then(() => activeHandles.delete(task), () => activeHandles.delete(task));
+    },
+    onError: (error) => {
+      if (error.code === FRAME_TOO_LARGE) {
+        report(`input line exceeded ${maxFrameBytes} byte limit`);
+        write(rpcError(null, -32700, 'parse error: request too large'));
+      } else if (error.code === FRAME_INVALID_UTF8) {
+        report('input stream contained invalid UTF-8');
+        write(rpcError(null, -32700, 'parse error: invalid UTF-8'));
+      } else {
+        report('input stream ended with an incomplete request');
+      }
     }
   });
   let closePromise = null;
