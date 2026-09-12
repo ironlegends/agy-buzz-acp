@@ -24,4 +24,9 @@ jobs:
           node-version: ${{ matrix.node }}
       - run: npm ci --ignore-scripts
       - run: npm test
+        if: runner.os != 'Windows'
+      # Concurrent test files spawn multiple cold PowerShell ACL helpers on
+      # shared Windows runners. Keep each file's own concurrency tests active.
+      - run: npm test -- --test-concurrency=1
+        if: runner.os == 'Windows'
       - run: node scripts/package-smoke.mjs
