@@ -129,7 +129,7 @@ An ownership lease newly acquired by a failed preflight may be released only whi
 
 Doctor now examines only steering binding/state metadata, not request text or acknowledgement payloads. Manual recovery guidance requires first stopping all affected providers/adapters, retaining evidence and checking uncertain effects, then archiving rather than deleting the blocked bridge. It never performs that operation.
 
-## Current lifecycle hardening
+## Version 0.5.10 lifecycle hardening
 
 The current lifecycle contract keeps the version-1 state record unchanged and stores transfer evidence only in adapter memory. A channel session becomes transferable only after the direct provider has retired, the publication is durably recorded as `sent`, and the channel record is saved as `ready`. One new ACP session may then claim that channel after rereading the ready record and binding its exact conversation ID. The former ACP `sessionId` remains addressable for cleanup but is permanently invalid for that channel; it cannot reclaim its cached conversation or start another provider turn.
 
@@ -139,4 +139,4 @@ A blocked record found by a fresh parent is unknown. The adapter leaves the reco
 
 After restart, a validated `ready` record remains resumable. The new AgySession inherits the ACP session's configured model and system instructions, then receives only the exact saved conversation ID through its trusted binding. This preserves the provider trust boundary without claiming isolation that the ACP prompt or a provider instruction cannot enforce. Buzz context exposes channel authority only; `replyTo` selects the publication destination and is never treated as a second scope.
 
-These rules describe the hardened lifecycle after the historical 0.5.8 and 0.5.3 observations below. Those release records retain their original evidence and limitations; they do not imply automatic recovery of an unknown blocked record under the current contract.
+These rules describe the hardened lifecycle after the historical 0.5.8 and 0.5.3 observations above. Those release records retain their original evidence and limitations; they do not imply automatic recovery of an unknown blocked record under the current contract.

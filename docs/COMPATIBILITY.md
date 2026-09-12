@@ -20,9 +20,9 @@ The final source/clean-worktree checks recorded 300 tests, 299 local Windows pas
 
 Separate genuine Google/Gemini tests completed normal and resumed turns, then masked a steering confirmation and held a terminal result to exercise the unchanged watchdog and same-process recovery. Those tests used a synthetic publisher. A separate authorized Desktop/relay check on 2026-09-11 observed all ten instances announcing 0.5.8, a sent reply independently received by Desktop, and a ready checkpoint at 15:47:33 UTC. This is not a visually inspected Activity Log, an OS-universal provider check or an exactly-once guarantee.
 
-## Current lifecycle hardening contract
+## Version 0.5.10 lifecycle hardening contract
 
-The current Task 3 lifecycle contract is conservative at the process boundary. A blocked state found by a fresh adapter parent is unknown: the adapter preserves the state and steering bridge, refuses reconciliation before steering archival, and performs no provider or publication work. Same-parent reconciliation requires observed retirement of that parent's direct provider, or a no-start proof tied to a block that the same parent wrote before starting a provider. Native lock ownership and the absence of a child process do not replace that proof.
+The lifecycle contract is conservative at the process boundary. A blocked state found by a fresh adapter parent is unknown: the adapter preserves the state and steering bridge, refuses reconciliation before steering archival, and performs no provider or publication work. Same-parent reconciliation requires observed retirement of that parent's direct provider, or a no-start proof tied to a block that the same parent wrote before starting a provider. Native lock ownership and the absence of a child process do not replace that proof.
 
 ACP channel transfer is one-shot and memory-authorized. The previous session must have completed provider retirement, a durably `sent` publication and a `ready` checkpoint. The new session rereads that ready record and binds the exact saved conversation; the old session ID is then permanently invalid for the channel. Concurrent new sessions are serialized, and a missing or blocked ready checkpoint keeps the existing owner in place. A validated ready record remains accepted after restart.
 
