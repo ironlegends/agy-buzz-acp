@@ -30,6 +30,7 @@ test('packages only the ACP runtime and required documentation', () => {
     'docs/OFFICIAL_BUZZ_RECOVERY.md',
     'docs/UPGRADING.md',
     'docs/MANAGER_RECOVERY.md',
+    'docs/OUTBOX_COMPATIBILITY.md',
     'docs/MIGRATING_04_TO_05.md',
     'examples',
     'README.md',
@@ -78,6 +79,7 @@ test('packages only the ACP runtime and required documentation', () => {
     'docs/OFFICIAL_BUZZ_RECOVERY.md',
     'docs/UPGRADING.md',
     'docs/MANAGER_RECOVERY.md',
+    'docs/OUTBOX_COMPATIBILITY.md',
     'docs/MIGRATING_04_TO_05.md',
     'README.md',
     'examples'
