@@ -17,13 +17,13 @@ Upgrading from 0.4.x? Read the [0.4.x to 0.5.8 migration guide](docs/MIGRATING_0
 
 ## Release status
 
-- **0.5.8 is the public release.** Its published source, archive and SHA-256 are recorded in [compatibility and release checks](docs/COMPATIBILITY.md).
+- **0.5.8 is the historical public release.** Its published source, archive and SHA-256 remain recorded in [compatibility and release checks](docs/COMPATIBILITY.md).
 - **0.5.9 was a draft superseded by 0.5.10.** Some installations already run 0.5.9; preserve its archive and exact checksum as rollback evidence, and never overwrite or delete them.
-- **0.5.10 is a draft candidate and is not published.** Do not deploy it to production or treat its archive as a release until the real Buzz validation and publication gates are complete. An explicitly authorized isolated canary may install it for validation. The candidate checks documented below do not by themselves prove live Buzz behavior.
+- **0.5.10 is the current release line.** Use the published v0.5.10 release assets when available; draft assets are not releases. The live Buzz and installed Desktop evidence is recorded in [compatibility and release checks](docs/COMPATIBILITY.md).
 
 ## Install and register
 
-Download the public v0.5.8 archive from the [releases page](https://github.com/ironlegends/agy-buzz-acp/releases). To build an archive for local development or validation, use a source checkout:
+Download the published v0.5.10 archive from the [releases page](https://github.com/ironlegends/agy-buzz-acp/releases) when available; draft assets are not releases. To build an archive for local development or validation, use a source checkout:
 
 ```sh
 npm ci
@@ -34,7 +34,7 @@ npm pack
 Install a published archive only after checking its version and trusted SHA-256:
 
 ```sh
-npm install --global ./agy-buzz-acp-0.5.8.tgz
+npm install --global ./agy-buzz-acp-0.5.10.tgz
 ```
 
 The package provides `agy-buzz-acp`, `agy-buzz-recover`, `agy-buzz-doctor`, `agy-buzz-manage`, and `agy-buzz-steer-hook`. The native file-lock dependency and its bundled support packages are included in the release archive. No npm-registry publication is required to install the archive.
@@ -196,12 +196,12 @@ Grouped prompts with a valid explicit Context destination continue to work. An a
 
 This draft is superseded by 0.5.10. Published v0.5.8 archives remain unchanged. Preserve the 0.5.9 archive and checksum as rollback evidence for installations that already use that draft; no installation is updated by these source changes.
 
-## Hardening candidate: 0.5.10 (unpublished)
+## Hardening line: 0.5.10
 
-This unpublished source candidate adds pure, validated and bounded outbox reads shared with Doctor, serialized delivery transitions, bounded ACP/provider/hook framing and response aggregation, unambiguous managed identity selection, and consistent boolean configuration parsing. See [protocol limits](docs/PROTOCOL_LIMITS.md) and [outbox compatibility and retention](docs/OUTBOX_COMPATIBILITY.md).
+The 0.5.10 release line adds pure, validated and bounded outbox reads shared with Doctor, serialized delivery transitions, bounded ACP/provider/hook framing and response aggregation, unambiguous managed identity selection, and consistent boolean configuration parsing. See [protocol limits](docs/PROTOCOL_LIMITS.md) and [outbox compatibility and retention](docs/OUTBOX_COMPATIBILITY.md).
 
 Channel replacement now requires the completed-turn proof described above. After adapter death, an unknown blocked checkpoint stays blocked even if its native lock has been released. The provider retains its existing environment authority; a textual publication instruction is not credential isolation.
 
 Windows identity and ACL helpers have execution deadlines. Manager operations retain an atomic phase journal, and the read-only diagnostic reports interrupted, conflicting or unsafe artifacts without repairing them. See [manager recovery](docs/MANAGER_RECOVERY.md).
 
-These changes do not install or restart the adapter. Do not deploy this candidate to production or treat it as a release until real Buzz validation and publication are complete; an explicitly authorized isolated canary may use it for validation. Fixture and extracted-package checks remain distinct from real-provider, relay and installed Activity Log validation.
+Use only published, checksum-verified v0.5.10 assets for installation; draft assets are not releases. Fixture and extracted-package checks remain distinct from the real-provider, relay and installed Activity Log evidence recorded in [compatibility and release checks](docs/COMPATIBILITY.md).
