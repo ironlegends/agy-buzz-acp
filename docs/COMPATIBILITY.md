@@ -12,6 +12,22 @@
 
 Do not substitute one level for another. In particular, CI on an OS does not prove that an authenticated Antigravity binary is available or supported there.
 
+## Release status and succession
+
+| Version | Status | Operational meaning |
+| --- | --- | --- |
+| 0.5.8 | Public release | The published release documented below. |
+| 0.5.9 | Superseded draft | Already installed in some environments; preserve its archive and exact checksum for rollback history. |
+| 0.5.10 | Draft candidate, unpublished | Do not deploy to production or describe as released until the real Buzz validation and publication gates pass; an explicitly authorized isolated canary may use it for validation. |
+
+The 0.5.10 candidate is based on source commit `8e9886c836b5c96fb0347027327c334237fa4a4a`, with the same tree as commit `5e24970`. The initial candidate archive used for these checks had SHA-256 `dc53db97ce8bb1ad61aa985afec10ec72a99d47cc22a0731f28398ec65418750`; for a later documentation-only rebuild, use the current archive checksum in the release notes because this hash identifies the tested initial candidate. Candidate checks recorded 457 tests: 453 passed, 0 failed and 4 skipped; CI runs [34709072710](https://github.com/ironlegends/agy-buzz-acp/actions/runs/34709072710) and [34709074250](https://github.com/ironlegends/agy-buzz-acp/actions/runs/34709074250) each completed 9/9. These are source, package and CI checks; they do not by themselves constitute live 0.5.10 Buzz validation.
+
+An authorized provider proof on 2026-09-12T17:59:28Z with agy 1.2.2 passed two synthetic turns: a new provider resumed the same conversation, close was confirmed before synthetic publication, and both turns reached `ready` checkpoints. This establishes provider lifecycle and conversation continuity for the candidate. It does not prove a real Buzz relay round trip or installed Activity Log rendering. The remaining Buzz gate requires the injected agent identity, relay readback and installed UI inspection; a local `buzz users get` probe exited 3 because `BUZZ_PRIVATE_KEY` was required, and no secret was read or extracted.
+
+No deployment or publication occurred during this validation. The 0.5.9 release notice/readback retains its draft target asset IDs, digests and timestamps with title `Superseded`; ten observed processes remained on 0.5.9.
+
+Preserve the 0.5.9 archive and checksum separately from the 0.5.10 candidate. The versions remain distinct because 0.5.9 is already installed in some environments; never rewrite its rollback artifact or silently replace it.
+
 ## Released 0.5.8 evidence
 
 Release [v0.5.8](https://github.com/ironlegends/agy-buzz-acp/releases/tag/v0.5.8), source `ebd02c5199f6288d0096f32976e039c7c6f0b7b7`; archive SHA-256 `38bcb4f5d47f965eeec63187ebc86b470300579bc96619fbe351e0d750ac0b4a`.
@@ -43,7 +59,7 @@ Those observations describe the earlier build, not automatic proof for a later r
 5. With a separately authenticated provider, run two synthetic turns and verify safe continuity. Use a fake publisher.
 6. In an explicitly authorized Buzz installation, inspect generation, tool and delivery activities and compare the final sent event ID with the relay response.
 7. Obtain independent review for lifecycle, persistence and release changes. Record the exact Git SHA and archive SHA-256.
-8. Publish the repository and archive with accurate compatibility limitations. Registry publication is a separate distribution option.
+8. After the real Buzz validation and all preceding checks pass, publish the repository and archive with accurate compatibility limitations. Registry publication is a separate distribution option.
 
 ## Local data protection
 

@@ -9,6 +9,10 @@ created: 2026-09-07
 
 `agy-buzz-manage` installs a verified release archive into a versioned runtime directory and updates one existing Buzz harness. It never starts the adapter, reloads Buzz settings, or runs code from the archive while validating it. Archives from version 0.5.3 onward include the native file-lock dependency and its bundled support packages; install the complete archive.
 
+## Version succession
+
+The public release is 0.5.8. Version 0.5.9 was a draft superseded by 0.5.10; some installations already run 0.5.9, so preserve its archive and exact checksum as rollback evidence and never overwrite or delete them. Version 0.5.10 is a draft candidate and is not published. Do not deploy that candidate to production or treat it as a release until the real Buzz validation and publication gates are complete; an explicitly authorized isolated canary may install it for validation. Keep the versioned runtime directories and rollback artifacts distinct.
+
 Before migrating from 0.4.x, read [the migration guide](MIGRATING_04_TO_05.md). Stop the affected agent and confirm its providers and pending steering have settled; back up the harness, dedicated hook/plugin configuration and durable stores. Do not point different live versions at the same stores.
 
 The command is a dry run by default. Obtain the expected SHA-256 from the trusted release publication or its separately authenticated checksum, then inspect the plan:

@@ -15,9 +15,15 @@ The JavaScript runtime uses standard Node APIs. Windows has real-provider valida
 
 Upgrading from 0.4.x? Read the [0.4.x to 0.5.8 migration guide](docs/MIGRATING_04_TO_05.md) before changing a working installation. Steering is opt-in, but native locks and durable-checkpoint lifecycle changes also apply without steering.
 
+## Release status
+
+- **0.5.8 is the public release.** Its published source, archive and SHA-256 are recorded in [compatibility and release checks](docs/COMPATIBILITY.md).
+- **0.5.9 was a draft superseded by 0.5.10.** Some installations already run 0.5.9; preserve its archive and exact checksum as rollback evidence, and never overwrite or delete them.
+- **0.5.10 is a draft candidate and is not published.** Do not deploy it to production or treat its archive as a release until the real Buzz validation and publication gates are complete. An explicitly authorized isolated canary may install it for validation. The candidate checks documented below do not by themselves prove live Buzz behavior.
+
 ## Install and register
 
-Download an archive from the [releases page](https://github.com/ironlegends/agy-buzz-acp/releases), or build from a source checkout:
+Download the public v0.5.8 archive from the [releases page](https://github.com/ironlegends/agy-buzz-acp/releases). To build an archive for local development or validation, use a source checkout:
 
 ```sh
 npm ci
@@ -25,10 +31,10 @@ npm test
 npm pack
 ```
 
-Install the generated archive, or an archive from a reviewed release:
+Install a published archive only after checking its version and trusted SHA-256:
 
 ```sh
-npm install --global ./agy-buzz-acp-0.5.10.tgz
+npm install --global ./agy-buzz-acp-0.5.8.tgz
 ```
 
 The package provides `agy-buzz-acp`, `agy-buzz-recover`, `agy-buzz-doctor`, `agy-buzz-manage`, and `agy-buzz-steer-hook`. The native file-lock dependency and its bundled support packages are included in the release archive. No npm-registry publication is required to install the archive.
@@ -180,22 +186,22 @@ Use `agy-buzz-manage` to plan a local archive installation or rollback. Supply t
 
 See [recovery with official Buzz](docs/OFFICIAL_BUZZ_RECOVERY.md) for the native-lock design, forced-stop boundaries and migration requirements. Outbox recovery and conversation recovery remain separate mechanisms. Native dependencies are bundled in the release archive; do not copy only the JavaScript files when installing an extracted runtime.
 
-## Maintenance included from 0.5.9
+## Superseded draft: 0.5.9
 
-The source candidate adds read-only steering diagnostics, a specific error for multi-event batches without an explicit Context reply destination, and release of a newly acquired unused channel lease when preflight fails before this ACP session has bound a conversation or started a provider. Existing ownership and unconfirmed provider retirement remain protected; no lock file is deleted.
+The 0.5.9 draft added read-only steering diagnostics, a specific error for multi-event batches without an explicit Context reply destination, and release of a newly acquired unused channel lease when preflight fails before this ACP session has bound a conversation or started a provider. Existing ownership and unconfirmed provider retirement remain protected; no lock file is deleted.
 
 With durable state enabled, a successful provider is now retired and its confirmed conversation ID staged in the existing version-1 **blocked** record before publication. Only acknowledged delivery allows the final **ready** checkpoint. This preserves the current association if the process dies after delivery but before the ready checkpoint, including on the first turn. Failure to retire or stage prevents publication. It does not recover an identifier already lost by an older release, replay interrupted input, roll back tools, or make publication and storage transactional.
 
 Grouped prompts with a valid explicit Context destination continue to work. An ambiguous batch is still refused; 0.5.9 does not guess the last event or the channel root. Doctor reports blocked/invalid/archived steering metadata and missing recovery prerequisites without running a hook, acquiring a lock, changing permissions or disclosing record contents. Its configured-recovery flag does not prove that a live provider is stopped or a delivery is settled.
 
-Published v0.5.8 archives remain unchanged. No installation is updated by these source changes.
+This draft is superseded by 0.5.10. Published v0.5.8 archives remain unchanged. Preserve the 0.5.9 archive and checksum as rollback evidence for installations that already use that draft; no installation is updated by these source changes.
 
-## Hardening candidate: 0.5.10
+## Hardening candidate: 0.5.10 (unpublished)
 
-This source candidate adds pure, validated and bounded outbox reads shared with Doctor, serialized delivery transitions, bounded ACP/provider/hook framing and response aggregation, unambiguous managed identity selection, and consistent boolean configuration parsing. See [protocol limits](docs/PROTOCOL_LIMITS.md) and [outbox compatibility and retention](docs/OUTBOX_COMPATIBILITY.md).
+This unpublished source candidate adds pure, validated and bounded outbox reads shared with Doctor, serialized delivery transitions, bounded ACP/provider/hook framing and response aggregation, unambiguous managed identity selection, and consistent boolean configuration parsing. See [protocol limits](docs/PROTOCOL_LIMITS.md) and [outbox compatibility and retention](docs/OUTBOX_COMPATIBILITY.md).
 
 Channel replacement now requires the completed-turn proof described above. After adapter death, an unknown blocked checkpoint stays blocked even if its native lock has been released. The provider retains its existing environment authority; a textual publication instruction is not credential isolation.
 
 Windows identity and ACL helpers have execution deadlines. Manager operations retain an atomic phase journal, and the read-only diagnostic reports interrupted, conflicting or unsafe artifacts without repairing them. See [manager recovery](docs/MANAGER_RECOVERY.md).
 
-These changes do not install or restart the adapter. Fixture and extracted-package checks remain distinct from real-provider, relay and installed Activity Log validation.
+These changes do not install or restart the adapter. Do not deploy this candidate to production or treat it as a release until real Buzz validation and publication are complete; an explicitly authorized isolated canary may use it for validation. Fixture and extracted-package checks remain distinct from real-provider, relay and installed Activity Log validation.
