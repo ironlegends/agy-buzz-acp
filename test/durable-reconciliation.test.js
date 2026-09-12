@@ -33,7 +33,7 @@ function diagnosticReader(diagnostics) {
   return () => text;
 }
 
-async function durableHarness({ outboxFactory } = {}) {
+async function durableHarness({ outboxFactory, publisherFactory, sessionFactory } = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'agy-reconcile-'));
   const state = new SessionState({ dir, owner, relay });
   // A real, enabled outbox: the fourth condition is the only one that survives a
@@ -52,15 +52,15 @@ async function durableHarness({ outboxFactory } = {}) {
     sessionStateFactory: () => state,
     outboxFactory: outboxFactory ?? (() => outbox),
     identityFactory: async () => owner,
-    sessionFactory: () => ({
+    sessionFactory: sessionFactory ?? (() => ({
       prompt: async () => { counters.prompts += 1; return 'answer'; },
       setTrustedConversation(value) { trusted.push(value); },
       getConversationId: () => 'conversation-1',
       hasConfirmedConversation: () => true,
       retireForCheckpoint: async () => 'conversation-1', retireForRecovery: async () => true,
       cancel() {}, close() {}
-    }),
-    publisherFactory: () => ({ publish: async () => ({ status: 'sent', eventId: 'cd'.repeat(32) }) })
+    })),
+    publisherFactory: publisherFactory ?? (() => ({ publish: async () => ({ status: 'sent', eventId: 'cd'.repeat(32) }) }))
   });
   await server.handle({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: 1 } });
   await server.handle({ jsonrpc: '2.0', id: 2, method: 'session/new', params: { cwd: dir } });
@@ -80,39 +80,36 @@ async function durableHarness({ outboxFactory } = {}) {
   return { state, scope, outbox, turn, counters, trusted, record, readDiagnostics, dispose };
 }
 
-test('a record left blocked by a dead turn is reconciled on the next prompt', async () => {
-  const { state, scope, turn, counters, record, readDiagnostics, dispose } = await durableHarness();
+test('durable reconciliation requires an explicit provider retirement proof', async () => {
+  const { state, scope, record, dispose } = await durableHarness();
   try {
-    assert.equal((await turn()).result.stopReason, 'end_turn');
-    assert.equal((await record()).conversationId, 'conversation-1');
-
-    // Exactly what an idle-killed turn leaves behind: `invalidate` ran, `save` never did.
     await state.invalidate(scope);
-    assert.equal((await record()).status, 'blocked');
-
-    const resumed = await turn();
-    assert.ok(resumed?.result, `expected the blocked record to be reconciled, got ${JSON.stringify(resumed)}`);
-    assert.equal(resumed.result.stopReason, 'end_turn');
-    assert.equal(counters.prompts, 2, 'the provider must run once the block is reconciled');
-    assert.equal((await record()).status, 'ready');
-    assert.equal((await record()).conversationId, 'conversation-1', 'reconciliation must resume, not discard');
-    assert.match(readDiagnostics(), /session record reconciled channel=123e4567-e89b-12d3-a456-426614174000 conversation=conversation-1/);
+    const before = await readFile(state.path(channelId), 'utf8');
+    await assert.rejects(() => state.reconcile(scope), /confirmed provider retirement/i);
+    assert.equal(await readFile(state.path(channelId), 'utf8'), before, 'unconfirmed reconciliation must preserve the block');
   } finally { await dispose(); }
 });
 
-test('a record blocked before any conversation existed is removed rather than resumed', async () => {
-  const { state, scope, turn, counters, trusted, record, readDiagnostics, dispose } = await durableHarness();
+test('a no-start block created by this parent may be reconciled without a conversation', async () => {
+  let publisherAttempts = 0;
+  const { state, scope, turn, counters, trusted, record, readDiagnostics, dispose } = await durableHarness({
+    publisherFactory: () => {
+      publisherAttempts += 1;
+      return publisherAttempts === 1 ? null : { publish: async () => ({ status: 'sent', eventId: 'ce'.repeat(32) }) };
+    }
+  });
   try {
-    // `invalidate` on a missing record writes `conversationId: null`: the turn died
-    // before the provider ever produced one, so there is nothing to resume.
-    await state.invalidate(scope);
+    const failed = await turn();
+    assert.ok(failed?.error, `publisher preflight unexpectedly succeeded: ${JSON.stringify(failed)}`);
+    assert.equal(counters.prompts, 0, 'the provider must not start before publisher preflight');
     assert.equal((await record()).conversationId, null);
 
     const resumed = await turn();
-    assert.ok(resumed?.result, `expected a fresh start, got ${JSON.stringify(resumed)}`);
+    assert.ok(resumed?.result, `expected no-start reconciliation, got ${JSON.stringify(resumed)}`);
     assert.equal(counters.prompts, 1);
     assert.deepEqual(trusted, [], 'no stale conversation may be bound as trusted');
     assert.equal((await record()).status, 'ready');
+    assert.equal(publisherAttempts, 2);
     assert.match(readDiagnostics(), /session record reconciled channel=[0-9a-f-]+ conversation=none/);
   } finally { await dispose(); }
 });
@@ -413,19 +410,20 @@ test('an unsettled delivery on the channel refuses reconciliation', async () => 
   } finally { await dispose(); }
 });
 
-test('an unsettled delivery on a different channel does not refuse this one', async () => {
-  // Without this case a broken channel filter hides behind the fail-closed default:
-  // every refusal would look correct because nothing would ever be reconciled.
+test('an unrelated unsettled delivery cannot prove a blocked record safe', async () => {
+  // A fresh or otherwise unproven parent must refuse regardless of unrelated
+  // outbox state. The durable block remains byte-for-byte unchanged.
   const { state, scope, outbox, turn, counters, record, dispose } = await durableHarness();
   try {
     await turn();
     await outbox.begin({ channelId: '99999999-e89b-12d3-a456-426614174000', replyTo, content: 'answer' });
     await state.invalidate(scope);
 
-    const resumed = await turn();
-    assert.ok(resumed?.result, `expected reconciliation, got ${JSON.stringify(resumed)}`);
-    assert.equal(counters.prompts, 2);
-    assert.equal((await record()).status, 'ready');
+    const before = await record();
+    const refused = await turn();
+    assert.ok(refused?.error, `unproven block was reconciled, got ${JSON.stringify(refused)}`);
+    assert.equal(counters.prompts, 1);
+    assert.deepEqual(await record(), before);
   } finally { await dispose(); }
 });
 

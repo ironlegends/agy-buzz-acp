@@ -349,7 +349,7 @@ export class AgySession {
     // Error/cancel paths can clear `child` before close. Never treat that as proof
     // of exit: even that case must await the recorded close promise, with a bound.
     if (closePromise) await this.waitForCloseWithin(closePromise, this.retireTimeoutMs);
-    else if (child) throw wrapperError('agy provider retirement could not be confirmed');
+    else throw wrapperError('agy provider retirement could not be confirmed');
     this.close();
     return true;
   }

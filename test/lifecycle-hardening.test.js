@@ -256,11 +256,15 @@ test('does not transfer ACP ownership when sent publication lacks ready checkpoi
   const channelId = channel('b');
   const replyTo = event('6');
   const records = [];
+  let publisherCalls = 0;
   const harness = await startDurableServer({
     root,
     saveOverride: () => async () => { throw new Error('synthetic ready checkpoint failure'); },
     sessionFactory: recordingSessionFactory(records),
-    publisherFactory: () => ({ publish: async () => ({ status: 'sent', eventId: 'a'.repeat(64) }) })
+    publisherFactory: () => ({ publish: async () => {
+      publisherCalls += 1;
+      return { status: 'sent', eventId: 'a'.repeat(64) };
+    } })
   });
   try {
     const formerSessionId = await harness.newSession();
@@ -268,11 +272,16 @@ test('does not transfer ACP ownership when sent publication lacks ready checkpoi
     assert.equal(first?.result?.publication?.status, 'sent', JSON.stringify(first));
     assert.equal((await readRecord(harness.state, channelId)).status, 'blocked');
     assert.equal((await harness.outbox.list()).at(-1).status, 'sent');
+    const blockedBytes = await readFile(harness.state.path(channelId), 'utf8');
+    const outboxBytes = await snapshotDirectory(harness.outbox.dir);
 
     const contenderSessionId = await harness.newSession();
     const refused = await harness.prompt(contenderSessionId, promptFor(channelId, replyTo, 'must remain blocked'));
     assert.ok(refused?.error, `unready session transferred ownership: ${JSON.stringify(refused)}`);
     assert.equal(records[1].promptCalls, 0);
+    assert.equal(publisherCalls, 1);
+    assert.equal(await readFile(harness.state.path(channelId), 'utf8'), blockedBytes);
+    assert.deepEqual(await snapshotDirectory(harness.outbox.dir), outboxBytes);
     assert.equal((await readRecord(harness.state, channelId)).status, 'blocked');
   } finally {
     await harness.close();
@@ -313,6 +322,7 @@ test('allows one new ACP session to win while a second new session is concurrent
   const channelId = channel('3');
   const replyTo = event('c');
   const records = [];
+  let publisherCalls = 0;
   let releaseFirst;
   let firstStarted;
   const firstStartedPromise = new Promise((resolve) => { firstStarted = resolve; });
@@ -324,7 +334,10 @@ test('allows one new ACP session to win while a second new session is concurrent
   const harness = await startDurableServer({
     root,
     sessionFactory: recordingSessionFactory(records, { promptGate: gate }),
-    publisherFactory: () => ({ publish: async () => ({ status: 'sent', eventId: 'd'.repeat(64) }) })
+    publisherFactory: () => ({ publish: async () => {
+      publisherCalls += 1;
+      return { status: 'sent', eventId: 'd'.repeat(64) };
+    } })
   });
   try {
     const contenderA = await harness.newSession();
@@ -334,10 +347,12 @@ test('allows one new ACP session to win while a second new session is concurrent
     const secondTurn = await harness.prompt(contenderB, promptFor(channelId, replyTo, 'loser'));
     assert.ok(secondTurn?.error, `concurrent session was accepted: ${JSON.stringify(secondTurn)}`);
     assert.equal(records[1].promptCalls, 0, 'losing session must not call provider');
+    assert.equal(publisherCalls, 0, 'losing session must not call publisher');
     releaseFirst();
     const firstResult = await firstTurn;
     assert.equal(firstResult?.result?.stopReason, 'end_turn', JSON.stringify(firstResult));
     assert.equal(records[0].promptCalls, 1);
+    assert.equal(publisherCalls, 1);
   } finally {
     releaseFirst?.();
     await harness.close();
@@ -350,6 +365,7 @@ test('keeps a live blocked turn as sole owner until its provider retires', async
   const channelId = channel('4');
   const replyTo = event('d');
   const records = [];
+  let publisherCalls = 0;
   let release;
   let started;
   const startedPromise = new Promise((resolve) => { started = resolve; });
@@ -364,7 +380,10 @@ test('keeps a live blocked turn as sole owner until its provider retires', async
         return undefined;
       }
     }),
-    publisherFactory: () => ({ publish: async () => ({ status: 'sent', eventId: '1'.repeat(64) }) })
+    publisherFactory: () => ({ publish: async () => {
+      publisherCalls += 1;
+      return { status: 'sent', eventId: '1'.repeat(64) };
+    } })
   });
   try {
     const firstSessionId = await harness.newSession();
@@ -377,6 +396,7 @@ test('keeps a live blocked turn as sole owner until its provider retires', async
     const second = await harness.prompt(secondSessionId, promptFor(channelId, replyTo, 'must wait'));
     assert.ok(second?.error, `live provider was bypassed: ${JSON.stringify(second)}`);
     assert.equal(records[1].promptCalls, 0);
+    assert.equal(publisherCalls, 0, 'contender must not call publisher while the provider is live');
     assert.equal(await readFile(harness.state.path(channelId), 'utf8'), blockedBytes);
 
     release();
@@ -384,6 +404,7 @@ test('keeps a live blocked turn as sole owner until its provider retires', async
     assert.equal(first?.result?.stopReason, 'end_turn', JSON.stringify(first));
     assert.equal(records[0].promptCalls, 1);
     assert.equal(records[1].promptCalls, 0);
+    assert.equal(publisherCalls, 1);
     assert.equal((await readRecord(harness.state, channelId)).status, 'ready');
   } finally {
     release?.();
