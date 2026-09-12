@@ -33,9 +33,17 @@ for(const prior of [false,true])for(const phase of ['before-publication','after-
       assert.equal(resumed.kind,'result');
       const publications=await readFile(join(dir,'published.jsonl'),'utf8').then(s=>s.trim().split('\n').filter(Boolean).map(JSON.parse)).catch(()=>[]);
       assert.equal(resumed.record.conversationId,'confirmed-conversation');
-      if(phase==='after-ack'){
-        assert.ok(resumed.rpc.error);assert.equal(resumed.providerCalls,0);assert.equal(publications.length,1);
-        assert.equal(resumed.record.status,'blocked');assert.equal(resumed.outbox[0].status,'inflight');
+      if(phase!=='after-checkpoint'){
+        // A fresh parent cannot infer that the former provider is gone from the
+        // durable block alone. Preserve every boundary and refuse before provider
+        // or publication work, including after an already-sent outbox record.
+        assert.ok(resumed.rpc.error);assert.equal(resumed.providerCalls,0);
+        const expectedPublications=['after-ack','after-sent'].includes(phase)?1:0;
+        assert.equal(publications.length,expectedPublications);
+        assert.equal(resumed.record.status,'blocked');
+        if(phase==='after-ack') assert.equal(resumed.outbox[0].status,'inflight');
+        if(phase==='after-sent') assert.equal(resumed.outbox[0].status,'sent');
+        if(phase==='before-publication') assert.deepEqual(resumed.outbox,[]);
       }else{
         assert.equal(resumed.rpc.result?.publication.status,'sent');assert.equal(resumed.trusted,'confirmed-conversation');
         assert.equal(resumed.providerCalls,1);assert.equal(resumed.record.status,'ready');

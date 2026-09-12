@@ -240,7 +240,6 @@ test('reports context loss after an unexpected process exit without replaying', 
   const failed = session.prompt('in-flight', () => {});
   children[0].stdout.emit('data', '{"event":"step_update"');
   children[0].emit('close');
-  assert.equal(session.buffer, '');
   await assert.rejects(failed, /agy exited before completing the prompt/);
 
   await assert.rejects(session.prompt('replay would be unsafe', () => {}), /agy session context lost; resume unsupported/);

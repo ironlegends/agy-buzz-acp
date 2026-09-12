@@ -1,10 +1,11 @@
-import { access, lstat, readdir, readFile, stat } from 'node:fs/promises';
+import { access, lstat, open, readdir, readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
-import { validateOutboxRecord } from './delivery/outbox.js';
+import { readOutboxRecordFile } from './delivery/outbox.js';
 import { validateSessionRecord } from './session-state.js';
 
 export const MAX_STATE_ENTRIES = 1000;
 export const MAX_STATE_FILE_BYTES = 256 * 1024;
+const OUTBOX_FILENAME_RE = /^[A-Za-z0-9_-]{1,96}\.json$/;
 
 function emptyRecords() {
   return { ready: 0, blocked: 0, uncertain: 0, invalid: 0 };
@@ -34,7 +35,11 @@ function lockResult() {
 }
 
 function isLockName(name) {
-  return typeof name === 'string' && name.endsWith('.lock');
+  return typeof name === 'string' && name.toLowerCase().endsWith('.lock');
+}
+
+function isSafeEntryName(name) {
+  return typeof name === 'string' && name.length > 0 && name !== '.' && name !== '..' && !/[\\/]/.test(name);
 }
 
 async function lockState(dir, name, { fsImpl, processAliveImpl }) {
@@ -68,12 +73,13 @@ async function lockState(dir, name, { fsImpl, processAliveImpl }) {
 
 /**
  * Inspect one configured state directory without invoking state-store methods.
- * The normal store APIs may transition inflight records to uncertain; this
- * scanner only reads filenames, stat metadata and the status field.
+ * This scanner only reads filenames, stat metadata and state records; it never
+ * asks a store API to transition an inflight record.
  */
 export async function inspectStateDirectory(dir, {
   kind = 'outbox',
-  fsImpl = { access, lstat, readdir, readFile, stat },
+  expectedOwner = null,
+  fsImpl = { access, lstat, open, readdir, readFile, stat },
   processAliveImpl = (pid) => {
     try { process.kill(pid, 0); return true; } catch (error) {
       if (error?.code === 'ESRCH') return false;
@@ -91,7 +97,7 @@ export async function inspectStateDirectory(dir, {
   };
   if (kind === 'outbox') summary.statuses = emptyStatuses();
   if (typeof dir !== 'string' || !dir.trim() || typeof fsImpl.lstat !== 'function' ||
-      typeof fsImpl.readdir !== 'function' || typeof fsImpl.readFile !== 'function') {
+      typeof fsImpl.readdir !== 'function' || (kind === 'session' && typeof fsImpl.readFile !== 'function')) {
     summary.scan.message = 'State contents are unavailable to this diagnostic';
     return summary;
   }
@@ -118,6 +124,9 @@ export async function inspectStateDirectory(dir, {
   }
   summary.entries.seen = names.length;
   const limit = Number.isInteger(maxEntries) && maxEntries > 0 ? maxEntries : MAX_STATE_ENTRIES;
+  const fileLimit = Number.isInteger(maxFileBytes) && maxFileBytes > 0
+    ? Math.min(maxFileBytes, MAX_STATE_FILE_BYTES)
+    : MAX_STATE_FILE_BYTES;
   const inspectedNames = names.slice(0, limit);
   summary.entries.inspected = inspectedNames.length;
   summary.entries.truncated = names.length > inspectedNames.length;
@@ -125,6 +134,12 @@ export async function inspectStateDirectory(dir, {
   summary.scan.status = 'pass';
   if (!summary.entries.truncated) summary.scan.message = 'State contents were inspected without changing them';
   for (const name of inspectedNames) {
+    if (!isSafeEntryName(name)) {
+      summary.records.invalid += 1;
+      if (kind === 'outbox') summary.statuses.invalid += 1;
+      summary.scan.status = 'warn';
+      continue;
+    }
     if (isLockName(name)) {
       summary.locks.total += 1;
       const state = await lockState(dir, name, { fsImpl, processAliveImpl });
@@ -132,15 +147,23 @@ export async function inspectStateDirectory(dir, {
       if (state.status === 'symlink') summary.scan.status = 'warn';
       continue;
     }
-    if (typeof name !== 'string' || !name.endsWith('.json')) continue;
+    if (typeof name !== 'string' || !name.toLowerCase().endsWith('.json')) continue;
     try {
+      if (kind === 'outbox' && !OUTBOX_FILENAME_RE.test(name)) throw new Error('invalid outbox filename');
       const recordPath = join(dir, name);
       const details = await fsImpl.lstat(recordPath);
-      if (details?.isSymbolicLink?.() || details?.isFile?.() === false) throw new Error('unsafe record');
-      if (Number.isFinite(details?.size) && details.size > maxFileBytes) throw new Error('oversized record');
-      const record = JSON.parse(await fsImpl.readFile(recordPath, 'utf8'));
-      if (kind === 'session') validateSessionRecord(record);
-      else if (!validateOutboxRecord(record)) throw new Error('invalid outbox record');
+      if (!details || details?.isSymbolicLink?.() || details?.isFile?.() !== true) throw new Error('unsafe record');
+      if (!Number.isFinite(details?.size) || details.size < 0 || details.size > fileLimit) throw new Error('record is outside the read bound');
+      let record;
+      if (kind === 'session') {
+        record = JSON.parse(await fsImpl.readFile(recordPath, 'utf8'));
+        validateSessionRecord(record);
+      } else {
+        record = await readOutboxRecordFile(recordPath, name.slice(0, -'.json'.length), {
+          expectedOwner, fsImpl, maxBytes: fileLimit
+        });
+        if (!record) throw new Error('missing outbox record');
+      }
       addRecord(summary, kind, record);
     } catch {
       summary.records.invalid += 1;

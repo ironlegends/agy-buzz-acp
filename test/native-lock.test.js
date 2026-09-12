@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmod, lstat, mkdir, mkdtemp, readdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, mkdtemp, readdir, rm, symlink, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
@@ -166,6 +166,7 @@ test('outbox retry uses the native lock and refuses a legacy claim directory', a
   try {
     const id = await outbox.begin({ channelId, replyTo: 'a'.repeat(64), content: 'final' });
     await outbox.update(id, { status: 'failed-before-start' });
+    await unlink(join(dir, `${id}.lock`));
     await mkdir(join(dir, `${id}.lock`));
     let calls = 0;
     assert.deepEqual(await outbox.retry(id, { owner: '1'.repeat(64), publish: async () => { calls += 1; return { status: 'sent' }; } }),
@@ -173,6 +174,29 @@ test('outbox retry uses the native lock and refuses a legacy claim directory', a
     assert.equal(calls, 0);
     assert.equal((await lstat(join(dir, `${id}.lock`))).isDirectory(), true);
   } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('outbox retry remains blocked while another process holds the same native claim lock', async () => {
+  const dir = await tempDir('agy-native-outbox-process-');
+  const outbox = new DeliveryOutbox({ dir, owner: '1'.repeat(64), idFn: () => 'process-retry' });
+  let holder;
+  try {
+    const id = await outbox.begin({ channelId, replyTo: 'a'.repeat(64), content: 'final' });
+    await outbox.update(id, { status: 'failed-before-start' });
+    holder = childLockScript(join(dir, `${id}.lock`));
+    assert.deepEqual(await waitForLine(holder), { status: 'acquired' });
+    let calls = 0;
+    assert.deepEqual(await outbox.retry(id, {
+      owner: '1'.repeat(64),
+      publish: async () => { calls += 1; return { status: 'sent', eventId: 'b'.repeat(64) }; }
+    }), { status: 'blocked', reason: 'busy' });
+    assert.equal(calls, 0);
+    assert.equal((await outbox.get(id)).status, 'failed-before-start');
+  } finally {
+    holder?.kill();
+    if (holder) await new Promise((resolve) => holder.once('close', resolve));
     await rm(dir, { recursive: true, force: true });
   }
 });

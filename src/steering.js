@@ -14,12 +14,44 @@ export const STEERING_SCHEMA_VERSION = 1;
 export const MAX_STEERING_TEXT_LENGTH = 16_384;
 export const MAX_PENDING_STEERS = 8;
 export const STEERING_LOCK_WAIT_MS = 2_000;
+// Cold PowerShell startup can exceed two seconds on loaded Windows hosts.
+// Keep auxiliary checks bounded without reusing the shorter steering lock wait.
+export const STEERING_WINDOWS_SUBPROCESS_TIMEOUT_MS = 10_000;
+
+export function readBooleanFlag(value) {
+  return value === true || value === '1' || value === 'true';
+}
 
 const OWNER_RE = /^[0-9a-f]{64}$/i;
 const CHANNEL_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const SESSION_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const CONVERSATION_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
 const STEER_RE = /^[0-9a-f-]{36}$/i;
+
+// Windows ACL and identity checks are auxiliary safety checks. Keep their
+// process lifetime bounded independently from the steering lock and provider
+// turn deadlines. The optional runner is deliberately narrow so tests can
+// exercise this helper with a real synthetic child without altering the
+// production command paths.
+export function runBoundedSubprocess(command, args = [], {
+  timeoutMs = STEERING_WINDOWS_SUBPROCESS_TIMEOUT_MS,
+  maxBuffer = 64 * 1024,
+  windowsHide = true,
+  env
+} = {}, execFileFn = execFile) {
+  if (typeof command !== 'string' || !command || !Array.isArray(args) || args.some((arg) => typeof arg !== 'string') ||
+      !Number.isInteger(timeoutMs) || timeoutMs < 1 ||
+      !Number.isInteger(maxBuffer) || maxBuffer < 1 || typeof execFileFn !== 'function') {
+    throw new TypeError('agy steering subprocess options are invalid');
+  }
+  return execFileFn(command, args, {
+    timeout: timeoutMs,
+    killSignal: 'SIGTERM',
+    maxBuffer,
+    windowsHide,
+    ...(env ? { env } : {})
+  });
+}
 
 function steeringError(message, code = 'AGY_STEER_PROTOCOL', cause) {
   return Object.assign(new Error(message, cause ? { cause } : undefined), { code, rpcMessage: message });
@@ -100,7 +132,7 @@ async function assertDirectory(dir) {
 }
 
 async function windowsOwnerSid() {
-  windowsOwnerSidPromise ??= execFile('whoami', ['/user'], { windowsHide: true, maxBuffer: 16 * 1024 })
+  windowsOwnerSidPromise ??= runBoundedSubprocess('whoami', ['/user'], { maxBuffer: 16 * 1024 })
     .then(({ stdout }) => stdout.match(/S-1-\d+(?:-\d+)+/)?.[0] ?? null)
     .catch(() => null);
   const ownerSid = await windowsOwnerSidPromise;
@@ -121,11 +153,10 @@ async function readWindowsAccessRules(dir) {
   try {
     const systemRoot = process.env.SystemRoot ?? 'C:\\Windows';
     const powershell = join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
-    const { stdout } = await execFile(powershell, [
+    const { stdout } = await runBoundedSubprocess(powershell, [
       '-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script
     ], {
       env: { ...process.env, AGY_STEER_ACL_PATH: dir },
-      windowsHide: true,
       maxBuffer: 64 * 1024
     });
     const parsed = JSON.parse(stdout);
@@ -156,9 +187,7 @@ async function protectWindowsDirectory(dir) {
   if (process.platform !== 'win32') return;
   const ownerSid = await windowsOwnerSid();
   try {
-    await execFile('icacls', [dir, '/inheritance:r', '/grant:r', `*${ownerSid}:(OI)(CI)(F)`, '*S-1-5-18:(OI)(CI)(F)', '*S-1-5-32-544:(OI)(CI)(F)'], {
-      windowsHide: true, maxBuffer: 32 * 1024
-    });
+    await runBoundedSubprocess('icacls', [dir, '/inheritance:r', '/grant:r', `*${ownerSid}:(OI)(CI)(F)`, '*S-1-5-18:(OI)(CI)(F)', '*S-1-5-32-544:(OI)(CI)(F)'], { maxBuffer: 32 * 1024 });
   } catch (error) {
     throw steeringError('agy steering Windows ACL could not be protected', 'AGY_STEER_PATH', error);
   }

@@ -20,6 +20,14 @@ The final source/clean-worktree checks recorded 300 tests, 299 local Windows pas
 
 Separate genuine Google/Gemini tests completed normal and resumed turns, then masked a steering confirmation and held a terminal result to exercise the unchanged watchdog and same-process recovery. Those tests used a synthetic publisher. A separate authorized Desktop/relay check on 2026-09-11 observed all ten instances announcing 0.5.8, a sent reply independently received by Desktop, and a ready checkpoint at 15:47:33 UTC. This is not a visually inspected Activity Log, an OS-universal provider check or an exactly-once guarantee.
 
+## Version 0.5.10 lifecycle hardening contract
+
+The lifecycle contract is conservative at the process boundary. A blocked state found by a fresh adapter parent is unknown: the adapter preserves the state and steering bridge, refuses reconciliation before steering archival, and performs no provider or publication work. Same-parent reconciliation requires observed retirement of that parent's direct provider, or a no-start proof tied to a block that the same parent wrote before starting a provider. Native lock ownership and the absence of a child process do not replace that proof.
+
+ACP channel transfer is one-shot and memory-authorized. The previous session must have completed provider retirement, a durably `sent` publication and a `ready` checkpoint. The new session rereads that ready record and binds the exact saved conversation; the old session ID is then permanently invalid for the channel. Concurrent new sessions are serialized, and a missing or blocked ready checkpoint keeps the existing owner in place. A validated ready record remains accepted after restart.
+
+The ACP context parser supplies channel authority only. A thread root or fallback `--reply-to` value remains the publication destination, while `replyTo` never creates a second lifecycle scope. The resumed provider receives the exact trusted conversation association plus the ACP session's configured model and system instructions. These checks establish adapter-side binding and lifecycle ownership; they do not establish provider isolation beyond the capabilities actually exposed by the runtime.
+
 ## Historical baseline
 
 Before this release, the Windows adapter passed 96 fixture tests. A real provider conversation resumed after a completed turn and child termination. A Buzz message was published and acknowledged. Activity mapping was exercised through Buzz's source parser, but the installed desktop rendering was not visually inspected.

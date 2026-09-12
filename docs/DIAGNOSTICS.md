@@ -52,7 +52,7 @@ the size of each record file, and refuses symbolic-link roots, records and
 locks. Blocked, uncertain, invalid, truncated and stale findings make the
 store diagnostic a warning; the scanner never treats them as ready.
 
-An `inflight` record is only counted as `uncertain`; the doctor never transitions it. Outbox list scans are also read-only for delivery records in 0.5.8, whereas explicit get/show paths may classify abandoned inflight work as uncertain. Stale locks are evidence for manual
+An `inflight` record remains `inflight` in the diagnostic; the doctor never transitions it. Outbox list, get and raw-read paths are read-only for delivery records. Stale locks are evidence for manual
 operator reconciliation. The doctor does not unlock, retry, delete, or
 rewrite anything.
 

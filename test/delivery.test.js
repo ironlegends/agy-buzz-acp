@@ -154,7 +154,7 @@ test('bounds publisher output and time while failing closed', async () => {
   assert.deepEqual(await timedPublisher.publish({ channelId, replyTo, content: 'final' }), { status: 'uncertain' });
 });
 
-test('outbox persists inflight before spawn and converts it to uncertain after restart', async () => {
+test('outbox persists inflight before spawn and keeps restart reads side-effect free', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'agy-outbox-'));
   try {
     const first = new DeliveryOutbox({ dir, owner: '1'.repeat(64), idFn: () => 'recovery-test' });
@@ -168,8 +168,10 @@ test('outbox persists inflight before spawn and converts it to uncertain after r
     assert.equal(before.status, 'inflight');
     assert.match(before.createdAt, /^\d{4}-\d{2}-\d{2}T/);
     assert.equal(before.updatedAt, before.createdAt);
+    const beforeBytes = await readFile(join(dir, `${id}.json`));
     const restarted = new DeliveryOutbox({ dir, owner: '1'.repeat(64) });
-    assert.equal((await restarted.get(id)).status, 'uncertain');
+    assert.equal((await restarted.get(id)).status, 'inflight');
+    assert.deepEqual(await readFile(join(dir, `${id}.json`)), beforeBytes);
   } finally {
     await rm(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 10 });
   }
@@ -178,7 +180,8 @@ test('outbox persists inflight before spawn and converts it to uncertain after r
 test('outbox retries only proven pre-start failures and prevents sent or uncertain duplicates', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'agy-outbox-'));
   try {
-    const outbox = new DeliveryOutbox({ dir, owner: '1'.repeat(64), idFn: () => 'retry-test' });
+    const ids = ['retry-test', 'uncertain-retry-test'];
+    const outbox = new DeliveryOutbox({ dir, owner: '1'.repeat(64), idFn: () => ids.shift() });
     const id = await outbox.begin({ channelId, replyTo, content: 'final answer' });
     await outbox.update(id, { status: 'failed-before-start' });
     let calls = 0;

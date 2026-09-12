@@ -28,7 +28,7 @@ npm pack
 Install the generated archive, or an archive from a reviewed release:
 
 ```sh
-npm install --global ./agy-buzz-acp-0.5.8.tgz
+npm install --global ./agy-buzz-acp-0.5.10.tgz
 ```
 
 The package provides `agy-buzz-acp`, `agy-buzz-recover`, `agy-buzz-doctor`, `agy-buzz-manage`, and `agy-buzz-steer-hook`. The native file-lock dependency and its bundled support packages are included in the release archive. No npm-registry publication is required to install the archive.
@@ -110,7 +110,11 @@ Associations are scoped to the verified public Buzz identity, relay, canonical w
 
 Corrupted state and mismatched scope block automatic recovery. A native lock file may remain after release; its presence is not evidence of an active owner. The adapter does not automatically remove lock files, replay interrupted work or reconcile uncertain relay publication. The recovery CLI described below is for retained answers, not for overriding conversation locks.
 
-A record left blocked by an interrupted turn is reconciled on the next prompt only after the turn that wrote it has fully settled. Three durable/liveness conditions must hold: the adapter holds the channel ownership lock, which no second adapter can take; no turn is still running on that channel; and no `inflight` or `uncertain` delivery for that channel remains in the outbox. Version 0.5.8 additionally requires a bounded, confirmed provider close before reconciling a failed turn in the same process. It constructs a new provider-session object and binds only the validated stored conversation, without clearing context-loss flags on the failed object. Unknown retirement refuses without archiving the bridge. The conversation is resumed when the record still names one, and the record is removed when the turn died before any conversation existed. A blocked steering bridge is renamed to a sibling `-archived-<timestamp>` directory and rebuilt. Reconciliation therefore requires both a private session directory and a delivery outbox: without the outbox the delivery condition cannot be evaluated, and a condition that cannot be evaluated refuses. Every reconciliation and every refusal writes a diagnostic line naming the condition that closed the door. Reconciliation lifts a block; it never internally resubmits the interrupted prompt or archived correction and never turns an uncertain publication into a delivered one. The next submitted prompt is separate: Buzz may itself requeue prior events, so this is not an exactly-once guarantee for external tools. Archived corrections remain of uncertain consumption, not proven undelivered.
+A record left blocked by an interrupted turn requires proof retained by the same adapter process: confirmed direct-provider retirement, or proof that this process created the block before attempting any provider start. The adapter must also hold the channel ownership lock, have no running turn on that channel, and find no `inflight` or `uncertain` delivery in the outbox. A fresh adapter cannot infer provider retirement from a released native lock and refuses a blocked record before changing it or archiving its steering bridge.
+
+When same-process reconciliation is safe, the adapter creates a new provider-session object and binds only the validated stored conversation. A record without a conversation can be removed only under the same proof requirements. A blocked steering bridge is archived and rebuilt only after the recovery checks pass. Reconciliation requires both a private session directory and an outbox; unevaluable conditions refuse. It never resubmits the interrupted prompt or archived correction, and never converts uncertain publication into delivery. Buzz may independently requeue prior events, so this is not an exactly-once guarantee for external tools.
+
+A replacement ACP session can take over the channel after confirmed provider retirement, durably acknowledged delivery and a ready checkpoint. The old ACP session ID becomes permanently stale. Ownership remains channel-scoped; independent thread-scoped operation is unsupported.
 
 To deliberately start a new conversation instead, configure a new empty private session directory and preserve the old directory as evidence. This is an operator decision that discards continuity; it is not automatic recovery or prompt replay.
 
@@ -176,7 +180,7 @@ Use `agy-buzz-manage` to plan a local archive installation or rollback. Supply t
 
 See [recovery with official Buzz](docs/OFFICIAL_BUZZ_RECOVERY.md) for the native-lock design, forced-stop boundaries and migration requirements. Outbox recovery and conversation recovery remain separate mechanisms. Native dependencies are bundled in the release archive; do not copy only the JavaScript files when installing an extracted runtime.
 
-## Unreleased maintenance: 0.5.9
+## Maintenance included from 0.5.9
 
 The source candidate adds read-only steering diagnostics, a specific error for multi-event batches without an explicit Context reply destination, and release of a newly acquired unused channel lease when preflight fails before this ACP session has bound a conversation or started a provider. Existing ownership and unconfirmed provider retirement remain protected; no lock file is deleted.
 
@@ -185,3 +189,13 @@ With durable state enabled, a successful provider is now retired and its confirm
 Grouped prompts with a valid explicit Context destination continue to work. An ambiguous batch is still refused; 0.5.9 does not guess the last event or the channel root. Doctor reports blocked/invalid/archived steering metadata and missing recovery prerequisites without running a hook, acquiring a lock, changing permissions or disclosing record contents. Its configured-recovery flag does not prove that a live provider is stopped or a delivery is settled.
 
 Published v0.5.8 archives remain unchanged. No installation is updated by these source changes.
+
+## Hardening candidate: 0.5.10
+
+This source candidate adds pure, validated and bounded outbox reads shared with Doctor, serialized delivery transitions, bounded ACP/provider/hook framing and response aggregation, unambiguous managed identity selection, and consistent boolean configuration parsing. See [protocol limits](docs/PROTOCOL_LIMITS.md) and [outbox compatibility and retention](docs/OUTBOX_COMPATIBILITY.md).
+
+Channel replacement now requires the completed-turn proof described above. After adapter death, an unknown blocked checkpoint stays blocked even if its native lock has been released. The provider retains its existing environment authority; a textual publication instruction is not credential isolation.
+
+Windows identity and ACL helpers have execution deadlines. Manager operations retain an atomic phase journal, and the read-only diagnostic reports interrupted, conflicting or unsafe artifacts without repairing them. See [manager recovery](docs/MANAGER_RECOVERY.md).
+
+These changes do not install or restart the adapter. Fixture and extracted-package checks remain distinct from real-provider, relay and installed Activity Log validation.

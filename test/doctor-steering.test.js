@@ -47,6 +47,12 @@ test('missing and partial steering configuration are not reported as healthy ena
   assert.equal((await doctor({})).steering.enabled,false);
   const r=await doctor({AGY_STEER_HOOK_CONFIGURED:'1'}); assert.equal(r.steering.status,'fail'); assert.equal(r.ok,false);
 });
+test('doctor accepts the same explicit true steering flags as runtime configuration',async t=>{
+  const f=await fixture(t);
+  const r=await doctor({...f.env,AGY_STEER_HOOK_CONFIGURED:'true',AGY_STEER_INJECTOR_EXCLUSIVE:'true'});
+  assert.equal(r.steering.enabled,true);
+  assert.equal(r.steering.bridges.blocked,1);
+});
 test('configured recovery is not a claim that a blocked bridge is safe to repair',async t=>{
   const f=await fixture(t); const r=await doctor({...f.env,AGY_SESSION_DIR:f.root,AGY_SESSION_OWNER:owner,AGY_OUTBOX_DIR:f.root,AGY_OUTBOX_OWNER:owner,BUZZ_RELAY_URL:'wss://test.invalid'});
   assert.equal(r.steering.automaticRecoveryConfigured,true); assert.equal(r.steering.status,'warn');
