@@ -322,7 +322,12 @@ async function inspectState(env, fsImpl, platform, { processAliveImpl } = {}) {
   for (const [name, key] of [['outbox', 'AGY_OUTBOX_DIR'], ['session', 'AGY_SESSION_DIR']]) {
     const store = stores[name];
     if (!store.configured || store.status === 'fail') continue;
-    const summary = await inspectStateDirectory(env[key], { kind: name, fsImpl, processAliveImpl });
+    const summary = await inspectStateDirectory(env[key], {
+      kind: name,
+      expectedOwner: name === 'outbox' ? env.AGY_OUTBOX_OWNER : null,
+      fsImpl,
+      processAliveImpl
+    });
     store.records = summary.records;
     store.locks = summary.locks;
     if (summary.statuses) {

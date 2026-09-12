@@ -567,13 +567,21 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
             publication = error?.publicationStatus ? { status: error.publicationStatus } : { status: 'uncertain', code: error?.code };
           }
           if (!publication || typeof publication !== 'object') publication = { status: 'uncertain' };
-          const status = ['sent', 'failed-before-start', 'uncertain'].includes(publication.status) ? publication.status : 'uncertain';
-          if (status !== 'sent') blockEntry(entry);
+          let status = ['sent', 'failed-before-start', 'uncertain'].includes(publication.status) ? publication.status : 'uncertain';
           if (recoveryId) {
-            try { await outbox.update(recoveryId, { status, ...(publication.eventId ? { eventId: publication.eventId } : {}) }); }
-            catch (error) { report(`outbox update failed code=${error?.code ?? 'unknown'} recovery=${recoveryId}`); }
+            try {
+              const persisted = await outbox.update(recoveryId, { status, ...(publication.eventId ? { eventId: publication.eventId } : {}) });
+              if (outbox.enabled && (!persisted || persisted.status !== status ||
+                  (status === 'sent' && persisted.eventId?.toLowerCase() !== publication.eventId?.toLowerCase()))) {
+                throw new Error('outbox update did not confirm persistence');
+              }
+            } catch (error) {
+              if (outbox.enabled) status = 'uncertain';
+              report(`outbox update failed code=${error?.code ?? 'unknown'} recovery=${recoveryId}`);
+            }
           }
-          const delivery = { status, ...(publication.eventId ? { eventId: publication.eventId } : {}), ...(recoveryId ? { recoveryId } : {}) };
+          if (status !== 'sent') blockEntry(entry);
+          const delivery = { status, ...(status === 'sent' && publication.eventId ? { eventId: publication.eventId } : {}), ...(recoveryId ? { recoveryId } : {}) };
           if (status === 'sent') deliveryActivity('tool_call_update', 'Response sent', 'completed');
           else if (status === 'failed-before-start') deliveryActivity('tool_call_update', 'Publication failed', 'failed', `Publication failed; recovery ${recoveryId ?? 'unavailable'}`);
           else deliveryActivity('tool_call_update', 'Delivery uncertain', 'failed', `Delivery uncertain; recovery ${recoveryId ?? 'unavailable'}`);

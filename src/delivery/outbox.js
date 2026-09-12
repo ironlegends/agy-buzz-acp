@@ -1,33 +1,61 @@
 import { randomUUID } from 'node:crypto';
-import { chmod, mkdir, readFile, readdir, rename, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { chmod, lstat, mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
 import { acquireNativeLock } from '../native-lock.js';
 
 const OWNER_RE = /^[0-9a-f]{64}$/i;
 const CHANNEL_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const EVENT_RE = /^[0-9a-f]{64}$/i;
+const ID_RE = /^[A-Za-z0-9_-]{1,96}$/;
+const DATE_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const RECORD_STATUSES = new Set(['inflight', 'uncertain', 'failed-before-start', 'sent']);
+const MAX_RECORD_BYTES = 256 * 1024;
+const MAX_RECORDS = 1000;
 
 function validId(id) {
-  return typeof id === 'string' && /^[A-Za-z0-9_-]{1,96}$/.test(id);
+  return typeof id === 'string' && ID_RE.test(id);
 }
 
-export function validateOutboxRecord(record) {
+function validDate(value) {
+  if (typeof value !== 'string' || !DATE_RE.test(value)) return false;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) && new Date(parsed).toISOString() === value;
+}
+
+function outboxError(message, code = 'AGY_OUTBOX') {
+  return Object.assign(new Error(message), { code, rpcMessage: message });
+}
+
+function validRecordShape(record) {
   if (!record || typeof record !== 'object' || Array.isArray(record) ||
       !validId(record.recoveryId) || !OWNER_RE.test(record.owner ?? '') ||
-      !CHANNEL_RE.test(record.channelId ?? '') || typeof record.replyTo !== 'string' ||
-      typeof record.content !== 'string' || !RECORD_STATUSES.has(record.status) ||
-      typeof record.createdAt !== 'string' || typeof record.updatedAt !== 'string' ||
+      !CHANNEL_RE.test(record.channelId ?? '') || !EVENT_RE.test(record.replyTo ?? '') ||
+      typeof record.content !== 'string' || Buffer.byteLength(record.content, 'utf8') > MAX_RECORD_BYTES ||
+      !RECORD_STATUSES.has(record.status) || !validDate(record.createdAt) ||
+      !validDate(record.updatedAt) ||
       (record.eventId !== undefined && !EVENT_RE.test(record.eventId))) return false;
+  if (record.status === 'sent' && !EVENT_RE.test(record.eventId ?? '')) return false;
   const keys = Object.keys(record).sort().join(',');
   return keys === 'channelId,content,createdAt,owner,recoveryId,replyTo,status,updatedAt' ||
     keys === 'channelId,content,createdAt,eventId,owner,recoveryId,replyTo,status,updatedAt';
 }
 
+export function validateOutboxRecord(record) {
+  return validRecordShape(record);
+}
+
+function normalizeDeliveryResult(result) {
+  if (result?.status === 'sent' && EVENT_RE.test(result.eventId ?? '')) {
+    return { status: 'sent', eventId: result.eventId };
+  }
+  if (result?.status === 'failed-before-start') return { status: 'failed-before-start' };
+  return { status: 'uncertain' };
+}
+
 export class DeliveryOutbox {
   constructor({ dir, owner, idFn = randomUUID, nowFn = () => new Date().toISOString() } = {}) {
     this.dir = typeof dir === 'string' && dir.trim() ? dir : null;
-    this.owner = OWNER_RE.test(owner ?? '') ? owner.toLowerCase() : null;
+    this.owner = typeof owner === 'string' && OWNER_RE.test(owner) ? owner.toLowerCase() : null;
     this.configurationError = (this.dir || owner != null) && (!this.dir || !this.owner)
       ? 'AGY_OUTBOX_DIR and AGY_OUTBOX_OWNER (64 hex characters) are both required'
       : null;
@@ -39,9 +67,35 @@ export class DeliveryOutbox {
     return Boolean(this.dir && this.owner && !this.configurationError);
   }
 
+  async _inspectDirectory() {
+    let details = null;
+    let current = this.dir;
+    while (true) {
+      let ancestor;
+      try { ancestor = await lstat(current); }
+      catch (error) {
+        if (error?.code !== 'ENOENT') throw outboxError('agy outbox directory could not be inspected', 'AGY_OUTBOX_DIRECTORY');
+      }
+      if (ancestor) {
+        if (ancestor.isSymbolicLink()) throw outboxError('agy outbox directory must not be a symlink', 'AGY_OUTBOX_SYMLINK');
+        if (!ancestor.isDirectory()) throw outboxError('agy outbox path is not a directory', 'AGY_OUTBOX_DIRECTORY');
+        if (current === this.dir) details = ancestor;
+      }
+      const parent = dirname(current);
+      if (parent === current) break;
+      current = parent;
+    }
+    return details;
+  }
+
   async ensureDir() {
     if (!this.enabled) return false;
-    await mkdir(this.dir, { recursive: true, mode: 0o700 });
+    let details = await this._inspectDirectory();
+    if (!details) {
+      await mkdir(this.dir, { recursive: true, mode: 0o700 });
+      details = await this._inspectDirectory();
+      if (!details) throw outboxError('agy outbox directory could not be inspected', 'AGY_OUTBOX_DIRECTORY');
+    }
     await chmod(this.dir, 0o700);
     return true;
   }
@@ -50,59 +104,168 @@ export class DeliveryOutbox {
     return join(this.dir, `${id}.json`);
   }
 
-  async writeAtomic(id, record) {
-    if (!this.enabled || !validId(id)) return null;
+  lockPath(id) {
+    return join(this.dir, `${id}.lock`);
+  }
+
+  async _writeAtomic(id, record) {
+    if (!validId(id) || !validRecordShape(record) || record.recoveryId !== id || record.owner.toLowerCase() !== this.owner) {
+      throw outboxError('agy outbox record is invalid', 'AGY_OUTBOX_RECORD');
+    }
+    const serialized = `${JSON.stringify(record)}\n`;
+    if (Buffer.byteLength(serialized, 'utf8') > MAX_RECORD_BYTES) {
+      throw outboxError('agy outbox record exceeds the read limit', 'AGY_OUTBOX_BOUNDS');
+    }
     await this.ensureDir();
     const temp = join(this.dir, `.${id}.${randomUUID()}.tmp`);
-    await writeFile(temp, `${JSON.stringify(record)}\n`, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
-    await rename(temp, this.path(id));
-    await chmod(this.path(id), 0o600);
-    return record;
-  }
-
-  async begin({ channelId, replyTo, content }) {
-    if (!this.enabled) return null;
-    const recoveryId = this.idFn();
-    const timestamp = this.nowFn();
-    const record = { recoveryId, owner: this.owner, channelId, replyTo, content, status: 'inflight', createdAt: timestamp, updatedAt: timestamp };
-    return (await this.writeAtomic(recoveryId, record)) && recoveryId;
-  }
-
-  async readRaw(id) {
-    if (!this.enabled || !validId(id)) return null;
-    try { return JSON.parse(await readFile(this.path(id), 'utf8')); }
-    catch (error) {
-      if (error?.code === 'ENOENT') return null;
+    try {
+      await writeFile(temp, serialized, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+      await rename(temp, this.path(id));
+      await chmod(this.path(id), 0o600);
+      return record;
+    } catch (error) {
+      await rm(temp, { force: true }).catch(() => {});
       throw error;
     }
   }
 
-  async get(id) {
-    const record = await this.readRaw(id);
-    if (!record) return null;
-    if (record.status === 'inflight') {
-      record.status = 'uncertain';
-      record.updatedAt = this.nowFn();
-      await this.writeAtomic(id, record);
+  // Kept as a compatibility surface for callers that used the old helper. Store
+  // transitions use _withRecordLock and never call this method from inside a lock.
+  async writeAtomic(id, record) {
+    if (!this.enabled || !validId(id)) return null;
+    return this._withRecordLock(id, () => this._writeAtomic(id, record));
+  }
+
+  async _readRecord(id) {
+    if (!this.enabled || !validId(id)) return null;
+    if (!await this._inspectDirectory()) return null;
+    let details;
+    try { details = await lstat(this.path(id)); }
+    catch (error) {
+      if (error?.code === 'ENOENT') return null;
+      throw outboxError('agy outbox record could not be read', 'AGY_OUTBOX_READ');
+    }
+    if (details.isSymbolicLink()) throw outboxError('agy outbox record must not be a symlink', 'AGY_OUTBOX_SYMLINK');
+    if (!details.isFile()) throw outboxError('agy outbox record is not a regular file', 'AGY_OUTBOX_TYPE');
+    if (!Number.isFinite(details.size) || details.size < 0 || details.size > MAX_RECORD_BYTES) {
+      throw outboxError('agy outbox record exceeds the read limit', 'AGY_OUTBOX_BOUNDS');
+    }
+    let record;
+    try { record = JSON.parse(await readFile(this.path(id), 'utf8')); }
+    catch { throw outboxError('agy outbox record is unreadable', 'AGY_OUTBOX_CORRUPT'); }
+    if (!validRecordShape(record)) throw outboxError('agy outbox record is invalid', 'AGY_OUTBOX_CORRUPT');
+    if (record.recoveryId !== id) throw outboxError('agy outbox filename does not match its recovery id', 'AGY_OUTBOX_FILENAME');
+    if (record.owner.toLowerCase() !== this.owner) {
+      throw outboxError('agy outbox record owner does not match the configured owner', 'AGY_OUTBOX_OWNER_MISMATCH');
     }
     return record;
   }
 
-  async update(id, changes) {
-    const record = await this.readRaw(id);
-    if (!record) return null;
-    const next = { ...record, ...changes, updatedAt: this.nowFn() };
-    return this.writeAtomic(id, next);
+  async _withRecordLock(id, action) {
+    await this.ensureDir();
+    let lock;
+    try { lock = await acquireNativeLock(this.lockPath(id)); }
+    catch (error) { throw error; }
+    let actionError;
+    try {
+      return await action();
+    } catch (error) {
+      actionError = error;
+      throw error;
+    } finally {
+      try { await lock.release(); }
+      catch (error) { if (!actionError) throw error; }
+    }
+  }
+
+  async begin({ channelId, replyTo, content } = {}) {
+    if (!this.enabled) return null;
+    const recoveryId = this.idFn();
+    const timestamp = this.nowFn();
+    const record = { recoveryId, owner: this.owner, channelId, replyTo, content,
+      status: 'inflight', createdAt: timestamp, updatedAt: timestamp };
+    if (!validRecordShape(record)) throw outboxError('agy outbox record is invalid', 'AGY_OUTBOX_RECORD');
+    return this._withRecordLock(recoveryId, async () => {
+      const existing = await this._readRecord(recoveryId);
+      if (existing) throw outboxError('agy outbox recovery id already exists', 'AGY_OUTBOX_COLLISION');
+      await this._writeAtomic(recoveryId, record);
+      return recoveryId;
+    });
+  }
+
+  async readRaw(id) {
+    return this._readRecord(id);
+  }
+
+  async get(id) {
+    return this.readRaw(id);
+  }
+
+  _nextRecord(record, changes, { retryFinal = false } = {}) {
+    if (!changes || typeof changes !== 'object' || Array.isArray(changes)) {
+      throw outboxError('agy outbox transition is invalid', 'AGY_OUTBOX_TRANSITION');
+    }
+    const keys = Object.keys(changes);
+    if (keys.some((key) => !['status', 'eventId'].includes(key))) {
+      throw outboxError('agy outbox transition contains unsupported fields', 'AGY_OUTBOX_TRANSITION');
+    }
+    const nextStatus = Object.hasOwn(changes, 'status') ? changes.status : record.status;
+    const transitions = {
+      inflight: new Set(['inflight', 'failed-before-start', 'uncertain', 'sent']),
+      'failed-before-start': new Set(['failed-before-start', 'uncertain', 'sent']),
+      uncertain: new Set(retryFinal ? ['uncertain', 'failed-before-start', 'sent'] : ['uncertain']),
+      sent: new Set(['sent'])
+    };
+    if (!transitions[record.status]?.has(nextStatus)) {
+      throw outboxError('agy outbox status transition is not permitted', 'AGY_OUTBOX_TRANSITION');
+    }
+    let eventId = Object.hasOwn(changes, 'eventId') ? changes.eventId : record.eventId;
+    if (eventId !== undefined && !EVENT_RE.test(eventId)) {
+      throw outboxError('agy outbox acknowledgement is invalid', 'AGY_OUTBOX_ACK');
+    }
+    if (nextStatus === 'sent' && !EVENT_RE.test(eventId ?? '')) {
+      throw outboxError('agy sent outbox records require an acknowledgement', 'AGY_OUTBOX_ACK');
+    }
+    if (record.status === 'sent' && (!eventId || eventId.toLowerCase() !== record.eventId.toLowerCase())) {
+      throw outboxError('agy sent outbox acknowledgement cannot change', 'AGY_OUTBOX_TRANSITION');
+    }
+    const next = { ...record, status: nextStatus, updatedAt: this.nowFn() };
+    if (eventId !== undefined) next.eventId = eventId;
+    else delete next.eventId;
+    if (!validRecordShape(next)) throw outboxError('agy outbox transition produced an invalid record', 'AGY_OUTBOX_RECORD');
+    return next;
+  }
+
+  async update(id, changes = {}) {
+    if (!this.enabled || !validId(id)) return null;
+    return this._withRecordLock(id, async () => {
+      const record = await this._readRecord(id);
+      if (!record) return null;
+      const next = this._nextRecord(record, changes);
+      return this._writeAtomic(id, next);
+    });
   }
 
   async list() {
     if (!this.enabled) return [];
-    await this.ensureDir();
-    const names = await readdir(this.dir);
+    if (!await this._inspectDirectory()) return [];
+    let entries;
+    try { entries = await readdir(this.dir, { withFileTypes: true }); }
+    catch { throw outboxError('agy outbox directory could not be read', 'AGY_OUTBOX_READ'); }
+    const recordEntries = entries.filter((entry) => entry.name.toLowerCase().endsWith('.json')).sort((left, right) => left.name.localeCompare(right.name));
+    if (recordEntries.length > MAX_RECORDS) throw outboxError('agy outbox contains too many records', 'AGY_OUTBOX_BOUNDS');
     const records = [];
-    for (const name of names.filter((name) => name.endsWith('.json'))) {
-      // Reconciliation scans live channels: never rewrite a concurrent publisher's checkpoint.
-      const record = await this.readRaw(name.slice(0, -5));
+    for (const entry of recordEntries) {
+      const id = entry.name.slice(0, -'.json'.length);
+      if (!validId(id) || entry.name !== `${id}.json`) {
+        throw outboxError('agy outbox filename is invalid', 'AGY_OUTBOX_FILENAME');
+      }
+      if (entry.isSymbolicLink() || !entry.isFile()) {
+        throw outboxError('agy outbox record must be a regular file', 'AGY_OUTBOX_TYPE');
+      }
+      // Go through the public read path so a scan remains a pure read and keeps
+      // the same validation contract as get/readRaw.
+      const record = await this.readRaw(id);
       if (record) records.push(record);
     }
     return records;
@@ -110,32 +273,52 @@ export class DeliveryOutbox {
 
   async retry(id, { publish, owner } = {}) {
     if (!validId(id)) return { status: 'blocked', reason: 'invalid-id' };
-    if (!this.enabled || typeof owner !== 'string' || owner.toLowerCase() !== this.owner) return { status: 'blocked', reason: 'owner-mismatch' };
-    const lockPath = join(this.dir, `${id}.lock`);
-    let lock;
-    try {
-      lock = await acquireNativeLock(lockPath);
-    } catch (error) {
-      if (['AGY_NATIVE_LOCK_BUSY', 'AGY_NATIVE_LOCK_LEGACY'].includes(error?.code)) return { status: 'blocked', reason: 'busy' };
-      return { status: 'blocked', reason: 'lock-unavailable' };
+    if (!this.enabled || typeof owner !== 'string' || owner.toLowerCase() !== this.owner) {
+      return { status: 'blocked', reason: 'owner-mismatch' };
     }
     try {
-      const record = await this.get(id);
-      if (!record) return { status: 'blocked', reason: 'missing' };
-      if (record.owner !== this.owner) return { status: 'blocked', reason: 'owner-mismatch' };
-      if (record.status !== 'failed-before-start') return { status: 'blocked', reason: record.status };
-      if (typeof publish !== 'function') return { status: 'blocked', reason: 'publisher-unavailable' };
-      // A crash after this durable transition is ambiguous and therefore never
-      // silently retried by a later process.
-      await this.update(id, { status: 'uncertain' });
-      let result;
-      try { result = await publish({ channelId: record.channelId, replyTo: record.replyTo, content: record.content }); }
-      catch { result = { status: 'uncertain' }; }
-      const status = result?.status === 'sent' ? 'sent' : result?.status === 'failed-before-start' ? 'failed-before-start' : 'uncertain';
-      await this.update(id, { status, ...(result?.eventId ? { eventId: result.eventId } : {}) });
-      return { status, ...(result?.eventId ? { eventId: result.eventId } : {}) };
-    } finally {
-      await lock.release();
+      return await this._withRecordLock(id, async () => {
+        let record;
+        try { record = await this._readRecord(id); }
+        catch (error) {
+          if (error?.code === 'AGY_OUTBOX_OWNER_MISMATCH') return { status: 'blocked', reason: 'owner-mismatch' };
+          return { status: 'blocked', reason: 'invalid-record' };
+        }
+        if (!record) return { status: 'blocked', reason: 'missing' };
+        if (record.owner.toLowerCase() !== this.owner) return { status: 'blocked', reason: 'owner-mismatch' };
+        if (record.status !== 'failed-before-start') return { status: 'blocked', reason: record.status };
+        if (typeof publish !== 'function') return { status: 'blocked', reason: 'publisher-unavailable' };
+
+        let claimed;
+        try {
+          claimed = this._nextRecord(record, { status: 'uncertain' });
+          await this._writeAtomic(id, claimed);
+        } catch {
+          return { status: 'blocked', reason: 'durability-failure' };
+        }
+
+        let result;
+        try { result = await publish({ channelId: claimed.channelId, replyTo: claimed.replyTo, content: claimed.content }); }
+        catch { result = { status: 'uncertain' }; }
+        const outcome = normalizeDeliveryResult(result);
+        try {
+          const final = this._nextRecord(claimed, outcome, { retryFinal: true });
+          await this._writeAtomic(id, final);
+          return outcome;
+        } catch {
+          // The external effect is now ambiguous if its positive acknowledgement
+          // could not be persisted. Keep the durable claim and fail closed.
+          return { status: 'uncertain' };
+        }
+      });
+    } catch (error) {
+      if (['AGY_NATIVE_LOCK_BUSY', 'AGY_NATIVE_LOCK_LEGACY'].includes(error?.code)) {
+        return { status: 'blocked', reason: 'busy' };
+      }
+      if (error?.code?.startsWith('AGY_NATIVE_LOCK_')) {
+        return { status: 'blocked', reason: 'lock-unavailable' };
+      }
+      throw error;
     }
   }
 }

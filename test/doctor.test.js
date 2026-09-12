@@ -447,7 +447,7 @@ test('state diagnostics summarize records and stale locks without mutating files
   const session = join(root, 'session');
   await mkdir(outbox); await mkdir(session);
   const outboxBase = { recoveryId: 'sent', owner: 'a'.repeat(64), channelId: '11111111-1111-4111-8111-111111111111', replyTo: 'd'.repeat(64), content: 'private answer', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
-  await writeFile(join(outbox, 'sent.json'), JSON.stringify({ ...outboxBase, status: 'sent' }));
+  await writeFile(join(outbox, 'sent.json'), JSON.stringify({ ...outboxBase, status: 'sent', eventId: 'e'.repeat(64) }));
   await writeFile(join(outbox, 'uncertain.json'), JSON.stringify({ ...outboxBase, recoveryId: 'uncertain', status: 'uncertain' }));
   const scope = { owner: 'b'.repeat(64), relay: 'c'.repeat(64), cwd: root, model: 'gemini-test-high', channelId: '11111111-1111-4111-8111-111111111111' };
   await writeFile(join(session, 'ready.json'), JSON.stringify({ schemaVersion: 1, sessionScope: 'channel', status: 'ready', scope, conversationId: 'private-conversation', updatedAt: new Date().toISOString() }));
@@ -491,6 +491,21 @@ test('state scanner strictly validates records and bounds entries without follow
   assert.equal(summary.records.invalid, 1000);
   assert.equal(reads, 999);
   assert.equal(summary.scan.status, 'warn');
+});
+
+test('outbox diagnostics bind each record to its filename and configured owner', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'agy-doctor-outbox-binding-'));
+  const timestamp = new Date().toISOString();
+  const base = { owner: 'a'.repeat(64), channelId: '11111111-1111-4111-8111-111111111111', replyTo: 'd'.repeat(64), content: 'private answer', status: 'uncertain', createdAt: timestamp, updatedAt: timestamp };
+  await writeFile(join(root, 'named.json'), JSON.stringify({ ...base, recoveryId: 'different' }));
+  await writeFile(join(root, 'owner.json'), JSON.stringify({ ...base, recoveryId: 'owner', owner: 'b'.repeat(64) }));
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  const summary = await inspectStateDirectory(root, { kind: 'outbox', expectedOwner: 'a'.repeat(64) });
+
+  assert.equal(summary.records.invalid, 2);
+  assert.equal(summary.statuses.invalid, 2);
+  assert.equal(summary.records.uncertain, 0);
 });
 
 test('doctor argument parser keeps old flags and accepts explicit probes', () => {
