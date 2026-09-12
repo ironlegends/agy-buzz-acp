@@ -14,7 +14,9 @@ export const STEERING_SCHEMA_VERSION = 1;
 export const MAX_STEERING_TEXT_LENGTH = 16_384;
 export const MAX_PENDING_STEERS = 8;
 export const STEERING_LOCK_WAIT_MS = 2_000;
-export const STEERING_WINDOWS_SUBPROCESS_TIMEOUT_MS = 2_000;
+// Cold PowerShell startup can exceed two seconds on loaded Windows hosts.
+// Keep auxiliary checks bounded without reusing the shorter steering lock wait.
+export const STEERING_WINDOWS_SUBPROCESS_TIMEOUT_MS = 10_000;
 
 export function readBooleanFlag(value) {
   return value === true || value === '1' || value === 'true';

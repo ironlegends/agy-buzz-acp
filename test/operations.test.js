@@ -81,6 +81,14 @@ async function createJunction(t, target) {
   return link;
 }
 
+test('the default subprocess deadline permits a slow successful auxiliary check', { timeout: 15_000 }, async () => {
+  const { runBoundedSubprocess } = await import('../src/steering.js');
+  const { stdout } = await runBoundedSubprocess(process.execPath, [
+    '-e', 'setTimeout(() => process.stdout.write("checked"), 2200)'
+  ]);
+  assert.equal(stdout, 'checked');
+});
+
 test('the bounded subprocess helper stops a real synthetic command that never exits', async () => {
   const steering = await import('../src/steering.js');
   assert.equal(typeof steering.runBoundedSubprocess, 'function');
