@@ -16,6 +16,30 @@ function fakeChild() {
   return child;
 }
 
+async function pendingRotatedPrompt() {
+  const children = [];
+  let now = 0;
+  const session = new AgySession({
+    nowFn: () => now,
+    spawnFn: () => {
+      const child = fakeChild();
+      children.push(child);
+      return child;
+    }
+  });
+  const first = session.prompt('first', () => {});
+  children[0].stdout.emit('data', JSON.stringify({ event: 'init', conversation_id: 'conv-1' }) + '\n');
+  children[0].stdout.emit('data', JSON.stringify({ event: 'result', result: {
+    status: 'SUCCESS', conversation_id: 'conv-1', response: 'first answer'
+  } }) + '\n');
+  assert.equal(await first, 'first answer');
+
+  now = ROTATION_AT_MS + 1;
+  const pending = session.prompt('second', () => {});
+  assert.equal(children.length, 1);
+  return { children, pending, session };
+}
+
 test('rotates before the 24 hour process cap and waits for close plus matching init', async () => {
   const children = [];
   let now = 0;
@@ -58,6 +82,40 @@ test('rotates before the 24 hour process cap and waits for close plus matching i
     status: 'SUCCESS', conversation_id: 'conv-1', response: 'second answer'
   } }) + '\n');
   assert.equal(await second, 'second answer');
+});
+
+test('does not spawn a rotated child when the session closes during rotation', async () => {
+  const { children, pending, session } = await pendingRotatedPrompt();
+  try {
+    session.close();
+    await assert.rejects(pending, /agy session closed/);
+    children[0].emit('close');
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.equal(children.length, 1);
+    assert.equal(session.child, null);
+    assert.equal(session.pending, null);
+    assert.equal(session.resumeTimer, null);
+  } finally {
+    session.close();
+  }
+});
+
+test('does not start a rotated child when the pending prompt is cancelled during rotation', async () => {
+  const { children, pending, session } = await pendingRotatedPrompt();
+  try {
+    session.cancel();
+    await assert.rejects(pending, { code: 'CANCELLED' });
+    children[0].emit('close');
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.equal(children.length, 1);
+    assert.equal(session.child, null);
+    assert.equal(session.pending, null);
+    assert.equal(session.resumeTimer, null);
+  } finally {
+    session.close();
+  }
 });
 
 test('refuses a rotated child whose init does not confirm the trusted conversation', async () => {

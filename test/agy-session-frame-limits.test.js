@@ -77,6 +77,49 @@ test('response text accumulation beyond the configured limit fails the turn with
   session.close();
 });
 
+test('accepts a result-only UTF-8 response exactly at the configured byte limit', async () => {
+  const child = fakeChild();
+  const session = new AgySession({ spawnFn: () => child, frameLimits: { maxResponseBytes: 4 } });
+  const pending = session.prompt('hi', () => {});
+  child.stdout.emit('data', JSON.stringify({ event: 'init', conversation_id: 'conv-1' }) + '\n');
+  child.stdout.emit('data', JSON.stringify({ event: 'result', result: {
+    conversation_id: 'conv-1', status: 'SUCCESS', response: '😀'
+  } }) + '\n');
+
+  assert.equal(await pending, '😀');
+  session.close();
+});
+
+test('does not double count a terminal response already emitted as deltas', async () => {
+  const withinLimitChild = fakeChild();
+  const withinLimitSession = new AgySession({ spawnFn: () => withinLimitChild,
+    frameLimits: { maxResponseBytes: 4 } });
+  const withinLimit = withinLimitSession.prompt('hi', () => {});
+  withinLimitChild.stdout.emit('data', JSON.stringify({ event: 'init', conversation_id: 'conv-1' }) + '\n');
+  withinLimitChild.stdout.emit('data', JSON.stringify({ event: 'response', response: { text: 'abcd' } }) + '\n');
+  withinLimitChild.stdout.emit('data', JSON.stringify({ event: 'result', result: {
+    conversation_id: 'conv-1', status: 'SUCCESS', response: 'abcd'
+  } }) + '\n');
+  assert.equal(await withinLimit, 'abcd');
+  withinLimitSession.close();
+});
+
+test('rejects an oversized terminal response after smaller deltas', async () => {
+  const oversizedChild = fakeChild();
+  const oversizedSession = new AgySession({ spawnFn: () => oversizedChild,
+    frameLimits: { maxResponseBytes: 4 } });
+  const oversized = oversizedSession.prompt('hi', () => {});
+  oversizedChild.stdout.emit('data', JSON.stringify({ event: 'init', conversation_id: 'conv-1' }) + '\n');
+  oversizedChild.stdout.emit('data', JSON.stringify({ event: 'response', response: { text: 'x' } }) + '\n');
+  oversizedChild.stdout.emit('data', JSON.stringify({ event: 'result', result: {
+    conversation_id: 'conv-1', status: 'SUCCESS', response: '😀a'
+  } }) + '\n');
+
+  await assert.rejects(oversized, /response exceeded the size limit/);
+  assert.equal(oversizedChild.killCalls, 1);
+  oversizedSession.close();
+});
+
 test('deferred provider events beyond the configured count fail the turn with a controlled error', async () => {
   const child = fakeChild();
   const stallingCoordinator = {

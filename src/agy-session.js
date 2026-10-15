@@ -268,6 +268,10 @@ export class AgySession {
         pending.rotating = true;
         await this.rotateChild();
         pending.rotating = false;
+        if (this.closed || this.pending !== pending) {
+          this.resumeEligible = false;
+          return;
+        }
       }
       if (this.contextLost) throw wrapperError(CONTEXT_LOST_MESSAGE);
       const resuming = this.resumeEligible && !this.child;
@@ -447,7 +451,7 @@ ${pending.text ?? ''}`
       pending.initialUserInputExpected = true;
       pending.initialUserInputSeen = false;
       pending.started = true;
-      pending.startedAt = this.childStartedAt ?? this.nowFn();
+      pending.startedAt = this.nowFn();
       pending.onActivity({ sessionUpdate: 'tool_call', toolCallId: `agy-${this.activityNonce}-provider-${pending.turnId}`,
         title: 'Model generation', toolName: 'agy_provider', kind: 'other', status: 'in_progress', index: 0 });
     } catch {
@@ -646,8 +650,7 @@ ${pending.text ?? ''}`
     }
   }
 
-  // Returns false when processing must stop for this chunk (the pending turn was
-  // just failed or finished), true to continue with the next buffered line.
+  // Returns false when this line invalidates the stream or turn, true to continue.
   processProviderLine(line, sourceChild) {
     if (!line.trim()) return true;
     let event;
@@ -693,7 +696,7 @@ ${pending.text ?? ''}`
       this.handleUserInput(step);
       return true;
     }
-    if (!this.validateEventConversation(event, sourceChild)) return false;
+    if (!this.validateEventConversation(event)) return false;
     if (event.event === 'init') {
       if (this.pending?.providerInitSeen) {
         this.failProviderEvent(steeringError('agy provider repeated init during active prompt'));
@@ -937,16 +940,18 @@ ${pending.text ?? ''}`
       this.finishPending(wrapperError('agy returned an unsuccessful result'));
       return;
     }
+    let response = typeof result.response === 'string' ? result.response : pending.emittedText;
     if (pending.injectedCount > 0) {
-      const response = pending.segments[pending.segmentIndex];
+      response = pending.segments[pending.segmentIndex];
       if (typeof response !== 'string' || response.length === 0) {
         void this.failSteeringPending(pending, steeringError('agy steering final response segment is missing'));
         return;
       }
-      this.finishPending(null, response, result.duration_seconds);
+    }
+    if (Buffer.byteLength(response, 'utf8') > this.maxResponseBytes) {
+      this.failProviderEvent(wrapperError('agy provider response exceeded the size limit'));
       return;
     }
-    const response = typeof result.response === 'string' ? result.response : pending.emittedText;
     this.finishPending(null, response, result.duration_seconds);
   }
 
@@ -1012,7 +1017,7 @@ ${pending.text ?? ''}`
     this.finishPending(finalFailure);
   }
 
-  validateEventConversation(event, sourceChild) {
+  validateEventConversation(event) {
     if (event.event === 'init') {
       const id = event.conversation_id;
       if (!validConversationId(id)) {

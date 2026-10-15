@@ -196,6 +196,29 @@ test('passes the private bridge to the child and publishes only the final correc
   session.close();
 });
 
+test('bounds the final steering segment that is returned', async () => {
+  const child = fakeChild();
+  const coordinator = fakeCoordinator();
+  const session = new AgySession({ steeringCoordinator: coordinator, spawnFn: () => child,
+    frameLimits: { maxResponseBytes: 4 } });
+  const turn = session.prompt('base', () => {});
+
+  emit(child, { event: 'init', conversation_id: conversationId });
+  emitUserInput(child, 2);
+  const steer = session.steer('correct the answer');
+  emitUserInput(child, 5);
+  emit(child, { event: 'step_update', step_update: {
+    step_type: 'agent_response', text_delta: '😀', conversation_id: conversationId, step_index: 6
+  } });
+  emit(child, { event: 'result', result: {
+    status: 'SUCCESS', conversation_id: conversationId, response: 'provider aggregate that is not returned'
+  } });
+
+  assert.deepEqual(await steer, { outcome: 'injected', steerId: 'steer-1', sequence: 1, userInputStep: 5 });
+  assert.equal(await turn, '😀');
+  session.close();
+});
+
 test('accepts steering requested before init after the provider initial input', async () => {
   const child = fakeChild();
   const coordinator = bootstrapCoordinator();
