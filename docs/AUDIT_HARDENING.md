@@ -15,6 +15,8 @@ The 2026-10-15 audit produced eight reproduced correctness defects. The candidat
 
 Shutdown now has an overall wait bound. An unconfirmed provider close retains ownership and reports failure; sending a kill signal does not establish provider exit. The adapter does not claim arbitrary descendant cleanup or exactly-once external effects.
 
+Actual installed validation on Buzz Desktop 0.5.28 and AGY 1.3.5 exposed four additional integration defects. The candidate now accepts only independently confirmed threaded-DM reply targets ([#29](https://github.com/ironlegends/agy-buzz-acp/issues/29)), binds hook workspace metadata to the actual provider cwd ([#30](https://github.com/ironlegends/agy-buzz-acp/issues/30)), permits proven same-adapter cancellation recovery into a new ACP session ([#31](https://github.com/ironlegends/agy-buzz-acp/issues/31)), and preserves conflict diagnostics instead of using a missing-resource/model error category ([#32](https://github.com/ironlegends/agy-buzz-acp/issues/32)). All existing scope, retirement, blocked-state and unresolved-delivery guards remain in force. See the dated installed evidence in [compatibility checks](COMPATIBILITY.md).
+
 ## Upgrade resistance
 
 The [compatibility manifest](compatibility-manifest.json) separates fixture, extracted-package, real-provider and installed-Desktop evidence. Required CI covers maintained Node 22/24 on Windows, macOS and Linux; Node 26 is an exploratory lane. The package lock and bundled dependency list describe the extracted runtime, including native locking, rather than relying on dependencies installed elsewhere on a developer machine.

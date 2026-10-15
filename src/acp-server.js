@@ -373,7 +373,7 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
       }
       if (message.method === 'session/set_config_option') {
         const entry = sessions.get(params.sessionId);
-        if (!entry) throw Object.assign(new Error('unknown session'), { rpcCode: -32001 });
+        if (!entry) throw Object.assign(new Error('unknown session'), { rpcCode: -32602, rpcMessage: 'unknown session' });
         if (activeTurns.has(params.sessionId)) throw Object.assign(new Error('session turn is busy'), {
           rpcCode: SESSION_CONFLICT_RPC_CODE, rpcMessage: 'session turn is busy'
         });
@@ -393,7 +393,7 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
       }
       if (message.method === '_session/steering') {
         const entry = sessions.get(params.sessionId);
-        if (!entry) throw Object.assign(new Error('unknown session'), { rpcCode: -32001 });
+        if (!entry) throw Object.assign(new Error('unknown session'), { rpcCode: -32602, rpcMessage: 'unknown session' });
         if (!steeringCapability || !entry.steering || typeof entry.session.steer !== 'function') {
           throw steeringRpcError('agy steering is unavailable without a confirmed dedicated hook');
         }
@@ -407,7 +407,7 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
       if (message.method === 'session/prompt') {
         if (Object.prototype.hasOwnProperty.call(params, 'model')) throw Object.assign(new Error('model override is not supported'), { rpcCode: -32602 });
         const entry = sessions.get(params.sessionId);
-        if (!entry) throw Object.assign(new Error('unknown session'), { rpcCode: -32001 });
+        if (!entry) throw Object.assign(new Error('unknown session'), { rpcCode: -32602, rpcMessage: 'unknown session' });
         let session = entry.session;
         if (activeTurns.has(params.sessionId)) throw Object.assign(new Error('session turn is busy'), {
           rpcCode: SESSION_CONFLICT_RPC_CODE, rpcMessage: 'session turn is busy'

@@ -634,7 +634,45 @@ test('returns deterministic errors for unsupported requests', async () => {
     await app.waitFor((m) => m.id === 2);
     app.send({ jsonrpc: '2.0', id: 3, method: 'session/prompt', params: { sessionId: 'missing', prompt: [] } });
     const missing = await app.waitFor((m) => m.id === 3);
-    assert.equal(missing.error.code, -32001);
+    assert.equal(missing.error.code, -32602);
+    assert.equal(missing.error.message, 'unknown session');
+  } finally {
+    await app.close();
+  }
+});
+
+test('unknown session IDs are invalid params and start no provider or publication work', async () => {
+  const calls = { sessionFactory: 0, providerPrompt: 0, modelChange: 0, steer: 0, publisherFactory: 0, publication: 0 };
+  const app = startMemoryServer({
+    sessionFactory: () => {
+      calls.sessionFactory += 1;
+      return {
+        prompt: async () => { calls.providerPrompt += 1; return 'unused'; },
+        setModel: () => { calls.modelChange += 1; },
+        steer: async () => { calls.steer += 1; return { outcome: 'injected' }; },
+        cancel() {}, close() {}
+      };
+    },
+    publisherFactory: () => {
+      calls.publisherFactory += 1;
+      return { publish: async () => { calls.publication += 1; return { status: 'sent' }; } };
+    }
+  });
+  try {
+    app.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: 1 } });
+    await app.waitFor((message) => message.id === 1);
+    const requests = [
+      [2, 'session/set_config_option', { sessionId: 'missing', configId: 'model', value: 'gemini-3.8-flash-high' }],
+      [3, '_session/steering', { sessionId: 'missing', prompt: [{ type: 'text', text: 'must not steer' }] }],
+      [4, 'session/prompt', { sessionId: 'missing', prompt: promptWithText('must not prompt') }]
+    ];
+    for (const [id, method, params] of requests) {
+      app.send({ jsonrpc: '2.0', id, method, params });
+      const response = await app.waitFor((message) => message.id === id);
+      assert.equal(response.error.code, -32602, method);
+      assert.equal(response.error.message, 'unknown session', method);
+    }
+    assert.deepEqual(calls, { sessionFactory: 0, providerPrompt: 0, modelChange: 0, steer: 0, publisherFactory: 0, publication: 0 });
   } finally {
     await app.close();
   }

@@ -18,7 +18,11 @@ Version 0.6.0 is an unreleased candidate. The package requires Node.js 22 or new
 
 The isolated ACP canary ran on Node.js 24.14.0 on Windows with the installed Antigravity CLI at version 1.3.5. The earlier CLI observation on 2026-10-15 was version 1.3.3; no explicit update command between those observations was recorded. Both model listings returned six verified models. The canary passed ACP initialization, a normal turn, checkpoint resume with the same conversation, and cancellation. It used a fake publisher, producing two fake publications and zero real publications. Observed ACP events included `init`, `result` and `step_update` with `agent_response`, `system_message` and `user_input` content. Steering was not run because the dedicated hook was not configured. This canary does not establish real relay delivery or installation in Buzz Desktop.
 
-The installed Buzz Desktop file version was 0.5.26. The registry reported 0.5.23, which is stale relative to that installed file observation. Version 0.5.28 was observed as the latest version, but it has not been installed or tested. The candidate has not been installed into Buzz Desktop.
+Buzz Desktop was updated from file version 0.5.26 to 0.5.28 through its official updater, after preserving the binaries and configuration. The earlier registry observation of 0.5.23 is historical. The 0.6.0 candidate is installed on a dedicated managed validation identity with private synthetic stores; the production agents retain their existing runtimes.
+
+The installed Windows canary uses Node 24.14.0, AGY 1.3.5 and Buzz Desktop 0.5.28. It has passed acknowledged real relay delivery, independent Desktop thread readback and visual Activity inspection. Real in-flight steering succeeded on the same provider process with a hook acknowledgement followed by a matching user-input step, one corrected final reply, no cancellation and no fallback. The final steering probe used the forward-only hook router without temporary metadata instrumentation. Explicit cancellation before a first checkpoint recovered into a fresh conversation; cancellation after a saved checkpoint and the native Desktop `Restart agent` workflow resumed the same saved conversation without replaying the interrupted input. The prolonged-use validation is still in progress.
+
+The installed diagnostics revision is source `291ba44ec7ab2da094a57a46b7053ea3c9b405cb`, archive SHA-256 `ba170dc93a49a3a18215032fe13a56d93d5419b10d3b99e8292ec354101221e7`. Earlier successful recovery and restart probes used `654b53fccca3a52e3c72152f65f56ef9dda0ce3d`; the later revision changes only conflict error classification and fixed busy diagnostics. These observations do not establish power-loss safety, arbitrary descendant cleanup, a 24-hour soak or universal future-provider compatibility.
 
 The adapter advertises ACP protocol version 1. Checkpoint record version 1 is retained inside the explicitly marked canonical store format 1, with lowercase UUID keys and owner/relay binding. Unmarked nonempty stores require [explicit migration](STATE_MIGRATION.md). Outbox version 1 is readable legacy evidence; version 2 binds new records and stores to an account and relay fingerprint. These implemented formats are candidate changes, not evidence of an installed migration or future provider compatibility.
 
@@ -30,7 +34,7 @@ When changing runtime support, verify the maintained Node.js LTS majors, update 
 
 | Version | Status | Operational meaning |
 | --- | --- | --- |
-| 0.6.0 | Unreleased candidate | Compatibility baseline recorded below; no candidate Buzz installation or real relay publication has been completed. |
+| 0.6.0 | Unreleased candidate | Dedicated candidate installation and real relay/steering/recovery checks completed; prolonged validation remains in progress. No release publication. |
 | 0.5.8 | Historical public release | The published release documented below. |
 | 0.5.9 | Superseded draft | Already installed in some environments; preserve its archive and exact checksum for rollback history. |
 | 0.5.10 | Existing release line | Use published v0.5.10 release assets when available; draft assets are not releases. |

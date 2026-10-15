@@ -67,19 +67,49 @@
     },
     "buzzDesktop": {
       "installedFileVersion": {
-        "value": "0.5.26",
+        "value": "0.5.28",
         "source": "fileVersion"
       },
+      "binarySha256": "be4b5abbf7ef635988c4151f5cec4c345bb0c108bf354a01be6ac2a586faeeec",
+      "updateMethod": "official-desktop-updater",
+      "previousInstalledFileVersion": "0.5.26",
       "registryVersion": {
         "value": "0.5.23",
-        "status": "stale-relative-to-installed-file-version"
+        "status": "historical-before-desktop-update"
       },
       "latestObservedVersion": {
         "value": "0.5.28",
-        "installed": false,
-        "tested": false
+        "installed": true,
+        "tested": true
       },
-      "candidateInstalled": false
+      "candidateInstalled": true
+    },
+    "installedBuzzCanary": {
+      "status": "validation-in-progress",
+      "platform": "win32",
+      "node": "24.14.0",
+      "agy": "1.3.5",
+      "buzzDesktop": "0.5.28",
+      "runtimeCommit": "291ba44ec7ab2da094a57a46b7053ea3c9b405cb",
+      "archiveSha256": "ba170dc93a49a3a18215032fe13a56d93d5419b10d3b99e8292ec354101221e7",
+      "scope": "dedicated-managed-canary-and-private-synthetic-stores",
+      "realRelayDelivery": "acknowledged-and-desktop-thread-readback",
+      "activityTranscript": "visually-inspected",
+      "steering": "passed-without-cancellation-or-fallback",
+      "steeringHookRouter": "forward-only-without-instrumentation",
+      "explicitFirstTurnCancellation": "passed-with-fresh-conversation-recovery",
+      "explicitCheckpointCancellation": "passed-with-same-conversation-recovery",
+      "desktopRestart": "passed-with-same-conversation-resume",
+      "evidenceRevisions": {
+        "firstTurnCancellation": "654b53fccca3a52e3c72152f65f56ef9dda0ce3d",
+        "checkpointCancellation": "654b53fccca3a52e3c72152f65f56ef9dda0ce3d",
+        "restartAndSteering": [
+          "654b53fccca3a52e3c72152f65f56ef9dda0ce3d",
+          "291ba44ec7ab2da094a57a46b7053ea3c9b405cb"
+        ],
+        "revisionChange": "conflict-error-classification-and-fixed-busy-diagnostics-only"
+      },
+      "productionProcessIdentitiesPreserved": 11
     }
   },
   "protocols": {
@@ -100,8 +130,8 @@
   },
   "claims": {
     "isolatedProviderCanaryCompleted": true,
-    "realBuzzPublicationVerified": false,
-    "candidateBuzzInstallationVerified": false,
+    "realBuzzPublicationVerified": true,
+    "candidateBuzzInstallationVerified": true,
     "futureProviderCompatibilityPromised": false
   }
 }
