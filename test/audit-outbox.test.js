@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { DeliveryOutbox, validateOutboxRecord } from '../src/delivery/outbox.js';
 
 const owner = 'ab'.repeat(32);
+const relay = 'wss://relay.example.invalid/acp';
 const channelId = '11111111-1111-4111-8111-111111111111';
 const replyTo = 'cd'.repeat(32);
 const eventId = 'ef'.repeat(32);
@@ -13,7 +14,7 @@ const eventId = 'ef'.repeat(32);
 async function fixture(t) {
   const dir = await mkdtemp(join(tmpdir(), 'agy-audit-outbox-'));
   t.after(() => rm(dir, { recursive: true, force: true }));
-  return new DeliveryOutbox({ dir, owner, idFn: () => 'sample' });
+  return new DeliveryOutbox({ dir, owner, relay, idFn: () => 'sample' });
 }
 const message = { channelId, replyTo, content: 'synthetic response' };
 
@@ -26,7 +27,7 @@ test('A01: invalid semantic records refuse the recovery scan', async (t) => {
 test('A02: a delayed reader cannot overwrite a concurrently persisted acknowledgement', async (t) => {
   const box = await fixture(t);
   await box.begin(message);
-  const reader = new DeliveryOutbox({ dir: box.dir, owner });
+  const reader = new DeliveryOutbox({ dir: box.dir, owner, relay });
   const read = reader.readRaw.bind(reader);
   let signalRead;
   let releaseRead;

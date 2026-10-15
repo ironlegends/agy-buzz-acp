@@ -20,6 +20,7 @@ const fakeBuzz = join(root, 'fixtures', 'fake-buzz.js');
 
 const channelId = '11111111-1111-4111-8111-111111111111';
 const replyTo = 'a'.repeat(64);
+const relay = 'wss://relay.example.invalid/acp';
 const alternateChannel = '22222222-2222-4222-8222-222222222222';
 const alternateReply = 'b'.repeat(64);
 const block = (text) => ({ type: 'text', text });
@@ -157,7 +158,7 @@ test('bounds publisher output and time while failing closed', async () => {
 test('outbox persists inflight before spawn and keeps restart reads side-effect free', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'agy-outbox-'));
   try {
-    const first = new DeliveryOutbox({ dir, owner: '1'.repeat(64), idFn: () => 'recovery-test' });
+    const first = new DeliveryOutbox({ dir, owner: '1'.repeat(64), relay, idFn: () => 'recovery-test' });
     const id = await first.begin({ channelId, replyTo, content: 'final answer' });
     const before = JSON.parse(await readFile(join(dir, `${id}.json`), 'utf8'));
     assert.equal(before.recoveryId, id);
@@ -169,7 +170,7 @@ test('outbox persists inflight before spawn and keeps restart reads side-effect 
     assert.match(before.createdAt, /^\d{4}-\d{2}-\d{2}T/);
     assert.equal(before.updatedAt, before.createdAt);
     const beforeBytes = await readFile(join(dir, `${id}.json`));
-    const restarted = new DeliveryOutbox({ dir, owner: '1'.repeat(64) });
+    const restarted = new DeliveryOutbox({ dir, owner: '1'.repeat(64), relay });
     assert.equal((await restarted.get(id)).status, 'inflight');
     assert.deepEqual(await readFile(join(dir, `${id}.json`)), beforeBytes);
   } finally {
@@ -181,7 +182,7 @@ test('outbox retries only proven pre-start failures and prevents sent or uncerta
   const dir = await mkdtemp(join(tmpdir(), 'agy-outbox-'));
   try {
     const ids = ['retry-test', 'uncertain-retry-test'];
-    const outbox = new DeliveryOutbox({ dir, owner: '1'.repeat(64), idFn: () => ids.shift() });
+    const outbox = new DeliveryOutbox({ dir, owner: '1'.repeat(64), relay, idFn: () => ids.shift() });
     const id = await outbox.begin({ channelId, replyTo, content: 'final answer' });
     await outbox.update(id, { status: 'failed-before-start' });
     let calls = 0;
@@ -206,7 +207,7 @@ test('outbox retries only proven pre-start failures and prevents sent or uncerta
 test('outbox serializes concurrent retries after rereading under the claim lock', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'agy-outbox-'));
   try {
-    const outbox = new DeliveryOutbox({ dir, owner: '1'.repeat(64), idFn: () => 'race-test' });
+    const outbox = new DeliveryOutbox({ dir, owner: '1'.repeat(64), relay, idFn: () => 'race-test' });
     const id = await outbox.begin({ channelId, replyTo, content: 'final answer' });
     await outbox.update(id, { status: 'failed-before-start' });
     let calls = 0;
@@ -236,7 +237,7 @@ test('outbox serializes concurrent retries after rereading under the claim lock'
 test('rejects traversal recovery ids before constructing a lock path', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'agy-outbox-'));
   try {
-    const outbox = new DeliveryOutbox({ dir, owner: '1'.repeat(64) });
+    const outbox = new DeliveryOutbox({ dir, owner: '1'.repeat(64), relay });
     assert.deepEqual(await outbox.retry('../outside', { owner: '1'.repeat(64), publish: async () => ({ status: 'sent' }) }), { status: 'blocked', reason: 'invalid-id' });
   } finally {
     await rm(dir, { recursive: true, force: true });
@@ -295,27 +296,47 @@ test('runs the recovery CLI through a directory alias', async () => {
 
 test('recovery CLI verifies the current Buzz identity before retrying stored delivery', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'agy-outbox-cli-'));
+  const archiveDir = join(tmpdir(), 'agy-cli-sent-archive-' + process.pid + '-' + Date.now());
   try {
     const owner = '1'.repeat(64);
-    const outbox = new DeliveryOutbox({ dir, owner, idFn: () => 'cli-test' });
-    await outbox.begin({ channelId, replyTo, content: 'operator response' });
-    await outbox.update('cli-test', { status: 'failed-before-start' });
+    const ids = ['cli-test', 'cli-test-2'];
+    const outbox = new DeliveryOutbox({ dir, owner, relay: 'wss://relay.example.invalid/acp', idFn: () => ids.shift() });
+    for (const id of ids.slice()) {
+      const recoveryId = await outbox.begin({ channelId, replyTo, content: 'operator response ' + id });
+      await outbox.update(recoveryId, { status: 'failed-before-start' });
+    }
     const env = isolatedChildEnvironment({ AGY_OUTBOX_DIR: dir, AGY_OUTBOX_OWNER: owner,
+      BUZZ_RELAY_URL: 'wss://relay.example.invalid/acp',
       BUZZ_CLI_COMMAND: process.execPath, BUZZ_FAKE_SCRIPT: fakeBuzz, BUZZ_SELF_PUBKEY: owner,
       BUZZ_CALLS_FILE: join(dir, 'calls.txt') });
     const cli = join(root, 'bin', 'agy-buzz-recover.js');
-    const listed = await execFileAsync(process.execPath, [cli, 'list'], { env });
-    assert.match(listed.stdout, /cli-test/);
+    await assert.rejects(execFileAsync(process.execPath, [cli, 'list'], { env }));
+    const listed = await execFileAsync(process.execPath, [cli, 'list', '--limit', '1'], { env });
+    const firstPage = JSON.parse(listed.stdout);
+    assert.deepEqual(firstPage.records.map((record) => record.recoveryId), ['cli-test']);
+    assert.equal(firstPage.nextCursor, 'cli-test');
+    const nextPage = await execFileAsync(process.execPath, [cli, 'list', '--limit', '1', '--after', 'cli-test'], { env });
+    assert.deepEqual(JSON.parse(nextPage.stdout).records.map((record) => record.recoveryId), ['cli-test-2']);
     const shown = await execFileAsync(process.execPath, [cli, 'show', 'cli-test'], { env });
-    assert.match(shown.stdout, /operator response/);
+    assert.match(shown.stdout, /operator response cli-test/);
     const retried = await execFileAsync(process.execPath, [cli, 'retry', 'cli-test'], { env });
     assert.match(retried.stdout, /"status":"sent"/);
     const calls = await readFile(join(dir, 'calls.txt'), 'utf8');
     assert.equal(calls.trim(), '1');
     await assert.rejects(execFileAsync(process.execPath, [cli, 'retry', 'cli-test'], { env: { ...env, BUZZ_SELF_PUBKEY: '2'.repeat(64) } }));
     assert.equal((await readFile(join(dir, 'calls.txt'), 'utf8')).trim(), '1');
+
+    const sentBytes = await readFile(outbox.path('cli-test'));
+    const dryRun = await execFileAsync(process.execPath, [cli, 'archive-sent', '--archive-dir', archiveDir], { env });
+    assert.deepEqual(JSON.parse(dryRun.stdout), { mode: 'dry-run', eligible: 1, archived: 0, skipped: 1 });
+    await assert.rejects(readFile(archiveDir), (error) => error.code === 'ENOENT');
+    const applied = await execFileAsync(process.execPath, [cli, 'archive-sent', '--archive-dir', archiveDir, '--apply'], { env });
+    assert.deepEqual(JSON.parse(applied.stdout), { mode: 'apply', eligible: 1, archived: 1, skipped: 1 });
+    assert.deepEqual(await readFile(join(archiveDir, 'cli-test.json')), sentBytes);
+    await assert.rejects(readFile(outbox.path('cli-test')), (error) => error.code === 'ENOENT');
   } finally {
     await rm(dir, { recursive: true, force: true });
+    await rm(archiveDir, { recursive: true, force: true });
   }
 });
 
@@ -341,7 +362,7 @@ async function memoryAcp({ publisherFactory, outboxFactory, sessionFactory, iden
 test('returns completed response status and recovery id when publication fails before start', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'agy-acp-outbox-'));
   try {
-    const outbox = new DeliveryOutbox({ dir, owner: '1'.repeat(64), idFn: () => 'server-failed' });
+    const outbox = new DeliveryOutbox({ dir, owner: '1'.repeat(64), relay, idFn: () => 'server-failed' });
     const app = await memoryAcp({ publisherFactory: () => ({ publish: async () => ({ status: 'failed-before-start' }) }), outboxFactory: () => outbox });
     const prompt = [block('[Base]'), block(`[Context]\nChannel: coordination (#${channelId})\nThread root: ${replyTo}`)];
     await app.server.handle({ jsonrpc: '2.0', id: 3, method: 'session/prompt', params: { sessionId: app.sessionId, prompt } });
@@ -402,7 +423,7 @@ test('serializes concurrent volatile recovery attempts', async () => {
 test('marks a publication uncertain when cancellation interrupts the publisher', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'agy-acp-outbox-'));
   try {
-    const outbox = new DeliveryOutbox({ dir, owner: '1'.repeat(64), idFn: () => 'server-cancel' });
+    const outbox = new DeliveryOutbox({ dir, owner: '1'.repeat(64), relay, idFn: () => 'server-cancel' });
     let resolvePublish;
     let resolveStarted;
     const started = new Promise((resolve) => { resolveStarted = resolve; });
@@ -432,7 +453,7 @@ test('classifies a started publisher crash across the ACP boundary, persists unc
     let ambiguousEffects = 0;
     let providerPrompts = 0;
     const owner = '1'.repeat(64);
-    const outbox = new DeliveryOutbox({ dir, owner, idFn: () => 'cut-recovery-1' });
+    const outbox = new DeliveryOutbox({ dir, owner, relay, idFn: () => 'cut-recovery-1' });
 
     const publisher = new BuzzPublisher({
       spawnFn: (_command, args) => {
