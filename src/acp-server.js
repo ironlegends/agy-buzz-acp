@@ -1,8 +1,9 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { promptToText } from './prompt.js';
-import { AgySession } from './agy-session.js';
+import { AgySession, PINNED_MODEL } from './agy-session.js';
 import { parseBuzzContext, buzzContextFailure } from './buzz-context.js';
 import { BuzzPublisher } from './buzz-publisher.js';
 import { createConfiguredOutbox } from './delivery/outbox.js';
@@ -13,6 +14,7 @@ import { createSteeringCoordinator, inspectSteeringBridge, reconcileSteeringBrid
 import { attachLineDecoder, FRAME_TOO_LARGE, FRAME_INVALID_UTF8, resolveFrameLimits } from './frame-codec.js';
 
 const JSON_RPC = '2.0';
+const ADAPTER_VERSION = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
 const TERMINAL_SESSION_CONTEXT_MESSAGE = 'agy session context lost; resume unsupported';
 const STEERING_RPC_CODE = -32004;
 const STEERING_UNCERTAIN_MESSAGE = 'agy steering outcome is uncertain';
@@ -80,7 +82,10 @@ export function describePromptShape(prompt) {
   return `blocks=${prompt.length} ${blocks.join(' ; ')}`;
 }
 
-export function createAcpServer({ input = process.stdin, output = process.stdout, diagnostics = process.stderr, sessionFactory, publisherFactory, outboxFactory, identityFactory, sessionStateFactory, modelCatalogFactory, steeringFactory, steeringConfig, steeringSupported, frameLimits = {} } = {}) {
+export function createAcpServer({ input = process.stdin, output = process.stdout, diagnostics = process.stderr, sessionFactory, publisherFactory, outboxFactory, identityFactory, sessionStateFactory, modelCatalogFactory, steeringFactory, steeringConfig, steeringSupported, frameLimits = {}, shutdownTimeoutMs = 5000 } = {}) {
+  if (!Number.isInteger(shutdownTimeoutMs) || shutdownTimeoutMs < 1 || shutdownTimeoutMs > 60_000) {
+    throw new TypeError('shutdownTimeoutMs must be a bounded positive integer');
+  }
   const resolvedFrameLimits = resolveFrameLimits(frameLimits);
   const maxFrameBytes = resolvedFrameLimits.maxFrameBytes;
   const sessions = new Map();
@@ -301,7 +306,7 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
             mcpCapabilities: { http: false, sse: false }
           },
           _meta: { steering: { supported: steeringCapability } },
-            agentInfo: { name: 'agy-buzz-acp', version: '0.5.10' }
+            agentInfo: { name: 'agy-buzz-acp', version: ADAPTER_VERSION }
         }));
         return;
       }
@@ -314,7 +319,7 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
         if (Object.prototype.hasOwnProperty.call(params, 'model')) {
           throw Object.assign(new Error('model override is not supported'), { rpcCode: -32602 });
         }
-        const configuredModel = process.env.AGY_MODEL ?? 'gemini-3.8-flash-high';
+        const configuredModel = process.env.AGY_MODEL ?? PINNED_MODEL;
         let catalog;
         try {
           const result = await getModelCatalog({ command: modelCommand, cwd: params.cwd, prefixArgs: modelPrefixArgs });
@@ -765,16 +770,36 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
   async function close() {
     if (closePromise) return closePromise;
     closePromise = (async () => {
-    closing = true;
-    for (const controller of activeTurns.values()) controller.abort();
-    for (const entry of sessions.values()) entry.session.close?.();
-    await Promise.allSettled([...activeHandles]);
-    await Promise.allSettled([...sessions.values()].map((entry) => entry.session.waitForClose?.()));
-    await sessionState?.release?.();
+      closing = true;
+      const unconfirmed = () => Object.assign(new Error('agy shutdown could not confirm provider exit; ownership retained'),
+        { code: 'AGY_SHUTDOWN_UNCONFIRMED' });
+      let timer;
+      try {
+        for (const controller of activeTurns.values()) controller.abort();
+        for (const entry of sessions.values()) entry.session.close?.();
+        const settled = (async () => {
+          await Promise.allSettled([...activeHandles]);
+          const results = await Promise.allSettled([...sessions.values()].map((entry) => entry.session.waitForClose?.()));
+          if (results.some(result => result.status === 'rejected')) throw unconfirmed();
+        })();
+        await Promise.race([settled, new Promise((_, reject) => {
+          timer = setTimeout(() => reject(unconfirmed()), shutdownTimeoutMs);
+        })]);
+      } catch {
+        // Sending a kill signal is not exit proof. Keep all leases if shutdown
+        // times out or a provider rejects its close confirmation.
+        throw unconfirmed();
+      } finally { clearTimeout(timer); }
+      await sessionState?.release?.();
     })();
     return closePromise;
   }
-  input.on('end', () => { void close(); });
+  input.on('end', () => {
+    void close().catch(() => {
+      report('shutdown could not confirm provider exit; ownership retained');
+      if (input === process.stdin) process.exitCode = 2;
+    });
+  });
   async function retryDelivery(recoveryId) {
     const record = recoveries.get(recoveryId);
     if (!record || record.status !== 'failed-before-start') return { status: 'blocked' };

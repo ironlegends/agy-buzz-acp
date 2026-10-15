@@ -8,7 +8,8 @@ const usage = 'Usage: agy-buzz-acp [models|setup|--help|--version]';
 async function main() {
   const args = process.argv.slice(2);
   if (args.length === 1 && ['--help', '-h'].includes(args[0])) {
-    process.stdout.write(`${usage}\nNo arguments: start ACP stdio.\nmodels: query the provider catalog.\nsetup: print a custom harness configuration without writing files.\n`);
+    const { setupUsage } = await import('../src/setup.js');
+    process.stdout.write(`${usage}\nNo arguments: start ACP stdio.\nmodels: query the provider catalog.\n${setupUsage()}\n`);
     return;
   }
   if (args.length === 1 && args[0] === '--version') {
@@ -31,7 +32,8 @@ async function main() {
     if (!agy) throw new Error('Antigravity executable not found; run setup or configure AGY_COMMAND');
     const models = await listModels({ command: agy.path, cwd: process.cwd(),
       prefixArgs: process.env.AGY_FAKE_SCRIPT ? [process.env.AGY_FAKE_SCRIPT] : [] });
-    const currentModelId = process.env.AGY_MODEL || 'gemini-3.8-flash-high';
+    const { PINNED_MODEL } = await import('../src/agy-session.js');
+    const currentModelId = process.env.AGY_MODEL || PINNED_MODEL;
     if (!/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/.test(currentModelId)) throw new Error('AGY_MODEL must be a valid model identifier');
     process.stdout.write(`${JSON.stringify({ agent: { name: 'agy-buzz-acp', version },
       stable: { configOptions: modelConfigOptions(models, currentModelId) },

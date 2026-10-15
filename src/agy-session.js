@@ -17,14 +17,11 @@ export const PROCESS_LIFETIME_MS = 24 * 60 * 60 * 1000;
 export const ROTATION_HEADROOM_MS = 3 * 60 * 60 * 1000;
 export const ROTATION_AT_MS = PROCESS_LIFETIME_MS - ROTATION_HEADROOM_MS;
 export const CONTEXT_LOST_MESSAGE = 'agy session context lost; resume unsupported';
-// agy print mode aborts at --print-timeout (default 5m0s) and exits without emitting
-// a terminal result event. That cap is a wall clock on the whole PROCESS, not a
-// per-turn idle timer: printmode.go logs `Print mode: starting` exactly once, at
-// spawn, and the observed abort landed 303.6s after that single line. AgySession
-// reuses one child across turns, so a value equal to Buzz's own 7200s max-turn
-// ceiling would kill a live turn on a process that had merely been alive that long.
-// Pinned far above any realistic adapter lifetime so a turn is bounded by Buzz
-// (idle 900s of silence, 7200s wall), never silently by the CLI.
+// Older provider observations showed a process-wide print timeout. Current CLI
+// help describes a turn wait, and an open-stdin idle probe survives a short cap.
+// Keep the conservative 24h pin and 21h between-turn rotation policy rather than
+// relying on one provider version's timeout implementation. Buzz deadlines remain
+// independent. Re-characterize normal/resume/cancel behavior before an upgrade.
 export const PINNED_PRINT_TIMEOUT = '24h';
 
 function validateModel(model) {
@@ -614,10 +611,9 @@ ${pending.text ?? ''}`
       if (this.resumeTimer) clearTimeout(this.resumeTimer);
       this.resumeTimer = null;
       if (this.pending?.steeringFailure) return;
-      // Report how long this agy process had been alive. --print-timeout is a
-      // per-process wall clock, so an exit that lands on the pin is a different
-      // failure from a crash on the first turn, and the age is the only signal
-      // that tells them apart from outside the CLI's own log files.
+      // Report process age to distinguish early startup failures from an exit
+      // near the conservative timeout/rotation policy, without assuming the
+      // provider applies its print timeout identically across versions.
       if (this.pending && !this.pending.rotating && this.hasUnsettledSteering(this.pending)) {
         void this.failSteeringPending(this.pending, steeringError('agy provider exited before steering consumption'));
       } else if (this.pending && !this.pending.rotating) {
