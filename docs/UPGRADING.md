@@ -11,7 +11,9 @@ created: 2026-09-07
 
 ## Version succession
 
-Version 0.5.10 is the current release line. Use the published v0.5.10 release assets when available; draft assets are not releases. Version 0.5.9 was a draft superseded by 0.5.10; some installations already run 0.5.9, so preserve its archive and exact checksum as rollback evidence and never overwrite or delete them. The historical v0.5.8 release and its evidence remain documented separately. Keep the versioned runtime directories and rollback artifacts distinct.
+Version 0.6.0 is an unreleased candidate with Node.js 22 as its minimum. It introduces canonical channel-store initialization and relay-bound outbox v2. Installing an archive does not migrate state or change environment variables. Before enabling this candidate, stop all affected adapters and providers, preserve old state/outbox/hook/harness bytes, and follow [state migration](STATE_MIGRATION.md) and [outbox compatibility](OUTBOX_COMPATIBILITY.md). Keep the old directories and runtime for rollback. Never point an older runtime at a new store or run old and new writers concurrently against the same directories. A blocked checkpoint or uncertain delivery remains unresolved after migration.
+
+Version 0.5.10 is the previous release line. Use the published v0.5.10 release assets when available; draft assets are not releases. Version 0.5.9 was a draft superseded by 0.5.10; some installations already run 0.5.9, so preserve its archive and exact checksum as rollback evidence and never overwrite or delete them. The historical v0.5.8 release and its evidence remain documented separately. Keep the versioned runtime directories and rollback artifacts distinct.
 
 Before migrating from 0.4.x, read [the migration guide](MIGRATING_04_TO_05.md). Stop the affected agent and confirm its providers and pending steering have settled; back up the harness, dedicated hook/plugin configuration and durable stores. Do not point different live versions at the same stores.
 

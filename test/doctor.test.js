@@ -115,7 +115,7 @@ test('offline doctor resolves configured executable paths containing spaces', as
       AGY_OUTBOX_OWNER: 'a'.repeat(64)
     },
     cwd: fixture.root,
-    nodeVersion: '20.0.0',
+    nodeVersion: '22.0.0',
     platform: 'linux'
   });
 
@@ -329,7 +329,7 @@ test('unsupported Node versions fail before capability checks', async () => {
   const report = await runDoctor({
     checkCapabilities: true,
     env: {},
-    nodeVersion: '19.9.0',
+    nodeVersion: '20.19.0',
     platform: 'darwin',
     spawnImpl: () => {
       spawnCalls += 1;

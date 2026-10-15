@@ -108,7 +108,7 @@ Delivery states:
 
 ## Conversation continuity
 
-Without durable state or steering, the adapter reuses its provider and rotates an aging provider process between completed turns, at 21 hours, leaving three hours before agy's 24-hour process limit (one hour of dispatch margin beyond a two-hour Buzz turn). It waits for the old child to close, starts `agy --conversation` with the confirmed identifier, and requires a matching `init` before sending the next prompt. Rotation does not interrupt an active turn or replay a previous prompt.
+Without durable state or steering, the adapter reuses its provider and rotates an aging provider process between completed turns at 21 hours. This conservative policy leaves three hours below the configured 24-hour print-timeout value. Provider timeout semantics have changed across observed versions, so this value is not a verified process lifetime guarantee. It waits for the old child to close, starts `agy --conversation` with the confirmed identifier, and requires a matching `init` before sending the next prompt. Rotation does not interrupt an active turn or replay a previous prompt.
 
 With durable state enabled, the provider instead retires after each successfully delivered and checkpointed turn, then restarts with the validated conversation for the next turn. This trades startup/resume latency for a confirmed provider-stop boundary.
 
@@ -129,7 +129,7 @@ To deliberately start a new conversation instead, configure a new empty private 
 Use a separate private state directory for each managed identity. Do not copy these records between machines. The same plaintext and Windows ACL limitations as the outbox apply.
 ## Retaining an undelivered answer
 
-Outbox persistence is disabled by default. Set both `AGY_OUTBOX_DIR` and `AGY_OUTBOX_OWNER` to enable it. A partial configuration is rejected.
+Outbox persistence is disabled by default. Set `AGY_OUTBOX_DIR` and `AGY_OUTBOX_OWNER`, with the actual `BUZZ_RELAY_URL`, to enable relay-bound version-2 storage. A partial configuration is rejected. Legacy records remain readable without assigning them to a new relay; see [outbox compatibility and retention](docs/OUTBOX_COMPATIBILITY.md).
 
 Records contain the final answer, destination, public owner, delivery state and timestamps. They do not contain prompts, provider credentials, private keys or environment dumps. These files are not encrypted. POSIX mode 0700/0600 is requested; on Windows, filesystem ACLs determine effective access. Provision a private directory for the account running Buzz and verify those ACLs before enabling storage. POSIX mode bits alone do not prove Windows privacy.
 
@@ -153,7 +153,7 @@ If an enabled outbox cannot write, the active adapter can retain a `mem_*` recov
 - `session/cancel` interrupts provider/publication work without replaying the prompt.
 - Images, audio, embedded context and bridging `mcpServers` are not supported. Provider-local tools remain governed by the provider's own configuration.
 
-The adapter starts `agy` without a shell and always includes `--sandbox`. `--print-timeout 24h` is a process lifetime limit, not an idle timeout. Buzz's turn deadlines remain separate. No permission bypass flag is supported.
+The adapter starts `agy` without a shell and always includes `--sandbox`. It pins `--print-timeout 24h` conservatively; Buzz's turn deadlines remain separate. Current CLI help describes a turn wait. The dated [compatibility evidence](docs/COMPATIBILITY.md) distinguishes that description from measured behavior. No permission bypass flag is supported.
 
 ## Development and validation
 
