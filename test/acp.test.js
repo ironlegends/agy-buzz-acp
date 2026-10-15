@@ -191,6 +191,15 @@ test('parses destination from structural prompt blocks', () => {
   assert.deepEqual(parseBuzzContext(livePrompt), { channelId, replyTo });
 });
 
+test('canonicalizes mixed-case channel and reply identities from trusted context', () => {
+  const upperReplyTo = replyTo.toUpperCase();
+  const prompt = [
+    { type: 'text', text: '[Base] Base platform context.' },
+    { type: 'text', text: `[Context]\nChannel: coordination (#${channelId.toUpperCase()})\nThread root: ${upperReplyTo}\n--reply-to ${replyTo}` }
+  ];
+  assert.deepEqual(parseBuzzContext(prompt), { channelId, replyTo });
+});
+
 // Measured live on 2026-09-03: the second turn of a Buzz session arrives as exactly three
 // blocks, with no [Base] block, because Buzz only sends the base and agent instructions once.
 const followUpTurnPrompt = [

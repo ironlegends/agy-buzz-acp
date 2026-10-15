@@ -11,8 +11,9 @@ const owner='ab'.repeat(32), channel='11111111-1111-4111-8111-111111111111', rel
 for(const previouslyOwned of [false,true]) test(`failed preflight releases only newly acquired unused ownership (${previouslyOwned})`,async t=>{
   const dir=await mkdtemp(join(tmpdir(),'agy-preflight-lease-'));
   const state=new SessionState({dir,owner,relay}), peer=new SessionState({dir,owner,relay});
+  await state.ensureOwnership(channel);
+  if(!previouslyOwned) await state.releaseOwnership(channel);
   await writeFile(state.path(channel),'{corrupt');
-  if(previouslyOwned) await state.ensureOwnership(channel);
   let calls=0,wire='';const output=new PassThrough();output.on('data',v=>{wire+=v;});
   const server=createAcpServer({input:new PassThrough(),output,diagnostics:new PassThrough(),
     ...isolatedServerOptions({sessionStateFactory:()=>state,identityFactory:async()=>owner,
@@ -53,7 +54,7 @@ test('blocked bridge preflight releases unused ownership without archiving the b
 });
 test('the active reservation remains held until unused ownership release settles',async()=>{
   const dir=await mkdtemp(join(tmpdir(),'agy-preflight-release-race-'));
-  const state=new SessionState({dir,owner,relay});await writeFile(state.path(channel),'{corrupt');
+  const state=new SessionState({dir,owner,relay});await state.ensureOwnership(channel);await state.releaseOwnership(channel);await writeFile(state.path(channel),'{corrupt');
   let entered,finish;const reached=new Promise(r=>{entered=r;});const gate=new Promise(r=>{finish=r;});
   const release=state.releaseOwnership.bind(state);state.releaseOwnership=async id=>{entered();await gate;return release(id);};
   let wire='';const output=new PassThrough();output.on('data',v=>{wire+=v;});

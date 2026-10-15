@@ -135,6 +135,18 @@ test('binding validation rejects a changed owner, channel, session, or conversat
   }
 });
 
+test('canonicalizes a mixed-case channel binding and keeps blocked bridge access available', async (t) => {
+  const mixedCaseChannel = channelId.toUpperCase();
+  const { coordinator } = await createHarness(t, { channelId: mixedCaseChannel });
+  assert.equal(coordinator.binding.channelId, channelId);
+  assert.equal(coordinator.assertBinding({ channelId: mixedCaseChannel }), true);
+  await coordinator.block('synthetic uncertain steering state');
+  assert.deepEqual(coordinator.bridgeEnv(), {
+    AGY_STEER_BRIDGE_DIR: coordinator.bridgeDir,
+    AGY_STEER_BINDING: coordinator.bindingToken
+  });
+});
+
 test('enqueue persists the claim watermark and blocked guard before exposing a request', async (t) => {
   const { coordinator } = await createHarness(t);
   const queued = await coordinator.enqueue('Correction A', { claimFloorStep: 41 });

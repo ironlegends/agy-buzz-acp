@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
@@ -128,6 +128,48 @@ test('allows only one live owner for a channel', async () => {
   } finally { await first.release(); await second.release(); await rm(dir, { recursive: true, force: true }); }
 });
 
+test('mixed-case channel UUIDs share one durable ownership key and canonical scope', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'agy-session-canonical-channel-'));
+  const mixedCaseChannel = '123E4567-E89B-12D3-A456-426614174000';
+  const first = new SessionState({ dir, owner, relay: 'wss://relay.example.test' });
+  const second = new SessionState({ dir, owner, relay: 'wss://relay.example.test' });
+  try {
+    const scope = await first.scope({ channelId: mixedCaseChannel, cwd: dir, model: 'gemini-3.8-flash-high' });
+    assert.equal(scope.channelId, channelId);
+    assert.equal(first.path(mixedCaseChannel), first.path(channelId));
+    await first.ensureOwnership(mixedCaseChannel);
+    assert.equal(first.ownsChannel(channelId), true);
+    await assert.rejects(second.ensureOwnership(channelId), /owned by another adapter/);
+  } finally { await first.release(); await second.release(); await rm(dir, { recursive: true, force: true }); }
+});
+
+test('an unmarked nonempty state directory refuses ownership without creating locks', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'agy-session-legacy-store-'));
+  const state = new SessionState({ dir, owner, relay: 'wss://relay.example.test' });
+  try {
+    await writeFile(join(dir, 'unrecognized-history.bin'), 'preserve me');
+    const namesBefore = await readdir(dir);
+    await assert.rejects(state.ensureOwnership(channelId), (error) => error.code === 'AGY_SESSION_STATE_LEGACY_STORE');
+    assert.deepEqual(await readdir(dir), namesBefore);
+  } finally { await state.release(); await rm(dir, { recursive: true, force: true }); }
+});
+
+test('a marked session store refuses a different owner or relay binding', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'agy-session-store-binding-'));
+  const first = new SessionState({ dir, owner, relay: 'wss://relay.example.test/one' });
+  const wrongOwner = new SessionState({ dir, owner: 'cd'.repeat(32), relay: 'wss://relay.example.test/one' });
+  const wrongRelay = new SessionState({ dir, owner, relay: 'wss://relay.example.test/two' });
+  try {
+    await first.ensureOwnership(channelId);
+    await first.release();
+    await assert.rejects(wrongOwner.ensureOwnership(channelId), (error) => error.code === 'AGY_SESSION_STATE_STORE_MISMATCH');
+    await assert.rejects(wrongRelay.ensureOwnership(channelId), (error) => error.code === 'AGY_SESSION_STATE_STORE_MISMATCH');
+  } finally {
+    await first.release(); await wrongOwner.release(); await wrongRelay.release();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('rejects an unverified Buzz identity', async () => {
   const { dir, state } = await configured();
   try { await assert.rejects(state.verifyIdentity(async () => 'cd'.repeat(32)), /does not match/); }
@@ -252,7 +294,7 @@ test('terminally blocks an ACP entry after uncertain publication before the next
   const output = new PassThrough();
   const diagnostics = new PassThrough();
   const state = new SessionState({ dir, owner, relay: 'wss://relay.example.test' });
-  const outbox = new DeliveryOutbox({ dir: outboxDir, owner, idFn: () => 'state-uncertain-1' });
+  const outbox = new DeliveryOutbox({ dir: outboxDir, owner, relay: 'wss://relay.example.test', idFn: () => 'state-uncertain-1' });
 
   let publishAttempts = 0;
   let ambiguousEffects = 0;
@@ -332,7 +374,7 @@ test('terminally blocks an ACP entry after uncertain publication before the next
     // Simulated restart: new SessionState and new server instance
     await server.close();
     const restartedState = new SessionState({ dir, owner, relay: 'wss://relay.example.test' });
-    const restartedOutbox = new DeliveryOutbox({ dir: outboxDir, owner });
+    const restartedOutbox = new DeliveryOutbox({ dir: outboxDir, owner, relay: 'wss://relay.example.test' });
     const scope = await restartedState.scope({ channelId, cwd: dir, model: 'gemini-3.8-flash-high' });
     await assert.rejects(restartedState.load(scope), /blocked/i);
 

@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { chmod, mkdir, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises';
+import { chmod, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { acquireNativeLock } from './native-lock.js';
+import { canonicalChannelId, initializeSessionStateStore, sessionStateChannelHash } from './session-state-store.js';
 
 const OWNER_RE = /^[0-9a-f]{64}$/i;
 const CHANNEL_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -16,6 +17,8 @@ function stateError(message, code = 'AGY_SESSION_STATE') {
 const OWNERSHIP_ERRORS = {
   AGY_SESSION_STATE_BUSY: 'the channel ownership lock is held elsewhere',
   AGY_SESSION_STATE_LEGACY_LOCK: 'a legacy channel lock requires controlled migration',
+  AGY_SESSION_STATE_LEGACY_STORE: 'an unmarked nonempty channel store requires controlled migration',
+  AGY_SESSION_STATE_STORE_MISMATCH: 'the channel store owner or relay binding does not match',
   AGY_SESSION_STATE_PERMISSIONS: 'channel ownership permissions are insufficient or unsafe',
   AGY_SESSION_STATE_SCOPE: 'channel ownership scope is invalid',
   AGY_SESSION_STATE_NATIVE_UNAVAILABLE: 'native channel locking is unavailable',
@@ -53,7 +56,14 @@ function validScope(scope) {
 }
 
 function scopeKey(channelId) {
-  return createHash('sha256').update(channelId).digest('hex');
+  if (channelId === 'adapter') return createHash('sha256').update(channelId).digest('hex');
+  return sessionStateChannelHash(channelId);
+}
+
+function canonicalScope(scope) {
+  if (!validScope(scope)) return null;
+  const channelId = canonicalChannelId(scope.channelId);
+  return channelId ? { ...scope, owner: scope.owner.toLowerCase(), channelId } : null;
 }
 
 function normalizeRelay(value) {
@@ -119,13 +129,13 @@ export class SessionState {
     if (!CHANNEL_RE.test(channelId) && channelId !== 'adapter') {
       throw stateError('agy session state scope is invalid', 'AGY_SESSION_STATE_SCOPE');
     }
+    const canonicalId = channelId === 'adapter' ? 'adapter' : canonicalChannelId(channelId);
+    if (this.ownedChannels.has(canonicalId)) return true;
     try {
-      await mkdir(this.dir, { recursive: true, mode: 0o700 });
-      await chmod(this.dir, 0o700);
-      const lockPath = join(this.dir, `.${scopeKey(channelId)}.lock`);
-      if (this.ownedChannels.has(channelId)) return true;
+      await initializeSessionStateStore({ dir: this.dir, owner: this.owner, relayHash: this.relay, lockFn: this.lockFn });
+      const lockPath = join(this.dir, `.${scopeKey(canonicalId)}.lock`);
       const lock = await this.lockFn(lockPath);
-      this.ownedChannels.set(channelId, lock);
+      this.ownedChannels.set(canonicalId, lock);
       return true;
     } catch (error) {
       throw classifyOwnershipError(error);
@@ -133,16 +143,17 @@ export class SessionState {
   }
 
   ownsChannel(channelId) {
-    return this.ownedChannels.has(channelId);
+    return this.ownedChannels.has(canonicalChannelId(channelId) ?? channelId);
   }
 
   // Only the server's reserved, never-started preflight may release this lease.
   // Keep the map entry until release succeeds; never unlink a native lock file.
   async releaseOwnership(channelId) {
-    const lock = this.ownedChannels.get(channelId);
+    const key = canonicalChannelId(channelId) ?? channelId;
+    const lock = this.ownedChannels.get(key);
     if (!lock) return false;
     await lock.release();
-    this.ownedChannels.delete(channelId);
+    this.ownedChannels.delete(key);
     return true;
   }
 
@@ -158,13 +169,14 @@ export class SessionState {
 
   async scope({ channelId, cwd, model }) {
     if (!this.enabled) return null;
-    if (!CHANNEL_RE.test(channelId ?? '') || typeof cwd !== 'string' || typeof model !== 'string' || !model) {
+    const canonicalId = canonicalChannelId(channelId);
+    if (!canonicalId || typeof cwd !== 'string' || typeof model !== 'string' || !model) {
       throw stateError('agy session state scope is invalid');
     }
     let canonicalCwd;
     try { canonicalCwd = await this.realpathFn(cwd); }
     catch { throw stateError('agy session state cwd could not be canonicalized'); }
-    const scope = { owner: this.owner, relay: this.relay, cwd: canonicalCwd, model, channelId };
+    const scope = { owner: this.owner, relay: this.relay, cwd: canonicalCwd, model, channelId: canonicalId };
     if (!validScope(scope)) throw stateError('agy session state scope is invalid');
     return scope;
   }
@@ -186,16 +198,17 @@ export class SessionState {
 
   async load(scope) {
     if (!this.enabled) return null;
-    if (!validScope(scope)) throw stateError('agy session state scope is invalid');
-    await this.ensureOwnership(scope.channelId);
+    const normalized = canonicalScope(scope);
+    if (!normalized) throw stateError('agy session state scope is invalid');
+    await this.ensureOwnership(normalized.channelId);
     let raw;
-    try { raw = JSON.parse(await readFile(this.path(scope.channelId), 'utf8')); }
+    try { raw = JSON.parse(await readFile(this.path(normalized.channelId), 'utf8')); }
     catch (error) {
       if (error?.code === 'ENOENT') return null;
       throw stateError('agy session state is corrupted');
     }
     const record = sanitizeRecord(raw);
-    if (!sameScope(record.scope, scope)) throw stateError('agy session state scope mismatch', 'AGY_SESSION_SCOPE_MISMATCH');
+    if (!sameScope(record.scope, normalized)) throw stateError('agy session state scope mismatch', 'AGY_SESSION_SCOPE_MISMATCH');
     if (record.status !== 'ready') throw stateError('agy session state is blocked after an incomplete turn', 'AGY_SESSION_STATE_BLOCKED');
     return record;
   }
@@ -205,18 +218,19 @@ export class SessionState {
   // must do this before publication; readiness still requires delivery success.
   async stageCheckpoint(scope, conversationId) {
     if (!this.enabled) return null;
-    if (!validScope(scope) || !CONVERSATION_RE.test(conversationId ?? '')) {
+    const normalized = canonicalScope(scope);
+    if (!normalized || !CONVERSATION_RE.test(conversationId ?? '')) {
       throw stateError('agy session state cannot stage an invalid association');
     }
-    await this.ensureOwnership(scope.channelId);
+    await this.ensureOwnership(normalized.channelId);
     let current;
-    try { current = sanitizeRecord(JSON.parse(await readFile(this.path(scope.channelId), 'utf8'))); }
+    try { current = sanitizeRecord(JSON.parse(await readFile(this.path(normalized.channelId), 'utf8'))); }
     catch { throw stateError('agy session state cannot stage an unreadable association'); }
-    if (!sameScope(current.scope, scope)) throw stateError('agy session state scope mismatch', 'AGY_SESSION_SCOPE_MISMATCH');
+    if (!sameScope(current.scope, normalized)) throw stateError('agy session state scope mismatch', 'AGY_SESSION_SCOPE_MISMATCH');
     if (current.status !== 'blocked') throw stateError('agy session state must be blocked before staging');
-    const staged = { ...current, conversationId, status: 'blocked', updatedAt: this.nowFn() };
-    const target = this.path(scope.channelId);
-    const temp = join(this.dir, `.${scopeKey(scope.channelId)}.${randomUUID()}.tmp`);
+    const staged = { ...current, scope: normalized, conversationId, status: 'blocked', updatedAt: this.nowFn() };
+    const target = this.path(normalized.channelId);
+    const temp = join(this.dir, `.${scopeKey(normalized.channelId)}.${randomUUID()}.tmp`);
     try {
       await writeFile(temp, `${JSON.stringify(staged)}\n`, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
       await rename(temp, target);
@@ -230,20 +244,21 @@ export class SessionState {
 
   async save(scope, conversationId) {
     if (!this.enabled) return null;
-    await this.ensureOwnership(scope.channelId);
-    if (!validScope(scope) || !CONVERSATION_RE.test(conversationId ?? '')) {
+    const normalized = canonicalScope(scope);
+    if (!normalized || !CONVERSATION_RE.test(conversationId ?? '')) {
       throw stateError('agy session state cannot save an invalid association');
     }
+    await this.ensureOwnership(normalized.channelId);
     const record = {
       schemaVersion: 1,
       sessionScope: 'channel',
       status: 'ready',
-      scope: { ...scope },
+      scope: normalized,
       conversationId,
       updatedAt: this.nowFn()
     };
-    const target = this.path(scope.channelId);
-    const temp = join(this.dir, `.${scopeKey(scope.channelId)}.${randomUUID()}.tmp`);
+    const target = this.path(normalized.channelId);
+    const temp = join(this.dir, `.${scopeKey(normalized.channelId)}.${randomUUID()}.tmp`);
     await writeFile(temp, `${JSON.stringify(record)}\n`, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
     try {
       await rename(temp, target);
@@ -262,43 +277,46 @@ export class SessionState {
   // never repaired from durable state alone.
   async reconcile(scope, proof = {}) {
     if (!this.enabled) return { reconciled: false, conversationId: null };
-    if (!validScope(scope)) throw stateError('agy session state scope is invalid');
-    await this.ensureOwnership(scope.channelId);
+    const normalized = canonicalScope(scope);
+    if (!normalized) throw stateError('agy session state scope is invalid');
+    await this.ensureOwnership(normalized.channelId);
     let raw;
-    try { raw = JSON.parse(await readFile(this.path(scope.channelId), 'utf8')); }
+    try { raw = JSON.parse(await readFile(this.path(normalized.channelId), 'utf8')); }
     catch (error) {
       if (error?.code === 'ENOENT') return { reconciled: false, conversationId: null };
       throw stateError('agy session state is corrupted');
     }
     const current = sanitizeRecord(raw);
-    if (!sameScope(current.scope, scope)) throw stateError('agy session state scope mismatch', 'AGY_SESSION_SCOPE_MISMATCH');
+    if (!sameScope(current.scope, normalized)) throw stateError('agy session state scope mismatch', 'AGY_SESSION_SCOPE_MISMATCH');
     if (current.status === 'ready') return { reconciled: false, conversationId: current.conversationId };
     if (!proof || proof.directProviderRetired !== true) {
       throw stateError('agy session state reconciliation requires confirmed provider retirement',
         'AGY_SESSION_STATE_RECONCILIATION_UNCONFIRMED');
     }
     if (!CONVERSATION_RE.test(current.conversationId ?? '')) {
-      await rm(this.path(scope.channelId), { force: true });
+      await rm(this.path(normalized.channelId), { force: true });
       return { reconciled: true, conversationId: null };
     }
-    const restored = await this.save(scope, current.conversationId);
+    const restored = await this.save(normalized, current.conversationId);
     return { reconciled: true, conversationId: restored.conversationId };
   }
 
   async invalidate(scope) {
     if (!this.enabled) return false;
-    await this.ensureOwnership(scope.channelId);
+    const normalized = canonicalScope(scope);
+    if (!normalized) throw stateError('agy session state scope is invalid');
+    await this.ensureOwnership(normalized.channelId);
     let record;
-    try { record = JSON.parse(await readFile(this.path(scope.channelId), 'utf8')); }
+    try { record = JSON.parse(await readFile(this.path(normalized.channelId), 'utf8')); }
     catch (error) {
       if (error?.code === 'ENOENT') {
         const blocked = { schemaVersion: 1, sessionScope: 'channel', status: 'blocked',
-          scope: { ...scope }, conversationId: null, updatedAt: this.nowFn() };
-        const temp = join(this.dir, `.${scopeKey(scope.channelId)}.${randomUUID()}.tmp`);
+          scope: normalized, conversationId: null, updatedAt: this.nowFn() };
+        const temp = join(this.dir, `.${scopeKey(normalized.channelId)}.${randomUUID()}.tmp`);
         try {
           await writeFile(temp, `${JSON.stringify(blocked)}\n`, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
-          await rename(temp, this.path(scope.channelId));
-          await chmod(this.path(scope.channelId), 0o600);
+          await rename(temp, this.path(normalized.channelId));
+          await chmod(this.path(normalized.channelId), 0o600);
           return true;
         } catch {
           await rm(temp, { force: true });
@@ -308,13 +326,13 @@ export class SessionState {
       throw stateError('agy session state is corrupted');
     }
     const current = sanitizeRecord(record);
-    if (!sameScope(current.scope, scope)) throw stateError('agy session state scope mismatch', 'AGY_SESSION_SCOPE_MISMATCH');
+    if (!sameScope(current.scope, normalized)) throw stateError('agy session state scope mismatch', 'AGY_SESSION_SCOPE_MISMATCH');
     const blocked = { ...current, status: 'blocked', updatedAt: this.nowFn() };
-    const temp = join(this.dir, `.${scopeKey(scope.channelId)}.${randomUUID()}.tmp`);
+    const temp = join(this.dir, `.${scopeKey(normalized.channelId)}.${randomUUID()}.tmp`);
     try {
       await writeFile(temp, `${JSON.stringify(blocked)}\n`, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
-      await rename(temp, this.path(scope.channelId));
-      await chmod(this.path(scope.channelId), 0o600);
+      await rename(temp, this.path(normalized.channelId));
+      await chmod(this.path(normalized.channelId), 0o600);
       return true;
     } catch {
       await rm(temp, { force: true });

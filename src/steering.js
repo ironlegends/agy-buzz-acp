@@ -68,7 +68,7 @@ function validateBinding(binding) {
   }
   const normalized = {
     ownerId: requireString(binding.ownerId, OWNER_RE, 'agy steering owner binding is invalid', 'AGY_STEER_BINDING'),
-    channelId: requireString(binding.channelId, CHANNEL_RE, 'agy steering channel binding is invalid', 'AGY_STEER_BINDING'),
+    channelId: requireString(binding.channelId, CHANNEL_RE, 'agy steering channel binding is invalid', 'AGY_STEER_BINDING').toLowerCase(),
     sessionId: requireString(binding.sessionId, SESSION_RE, 'agy steering session binding is invalid', 'AGY_STEER_BINDING'),
     conversationId: requireString(binding.conversationId, CONVERSATION_RE, 'agy steering conversation binding is invalid', 'AGY_STEER_BINDING'),
     nonce: requireString(binding.nonce, /^[0-9a-f]{32}$/i, 'agy steering nonce is invalid', 'AGY_STEER_BINDING')
@@ -526,10 +526,7 @@ export class SteeringCoordinator {
   }
 
   bridgeEnv() {
-    if (!this.enabled || this.blocked) return this.enabled ? {
-      AGY_STEER_BRIDGE_DIR: this.bridgeDir,
-      AGY_STEER_BINDING: this.bindingToken
-    } : null;
+    if (!this.enabled) return null;
     return { AGY_STEER_BRIDGE_DIR: this.bridgeDir, AGY_STEER_BINDING: this.bindingToken };
   }
 
@@ -537,7 +534,8 @@ export class SteeringCoordinator {
     const fields = ['ownerId', 'channelId', 'sessionId', 'conversationId'];
     for (const field of fields) {
       if (field === 'conversationId' && !this.conversationBound) continue;
-      if (candidate[field] !== undefined && candidate[field] !== this.binding[field]) {
+      const value = field === 'channelId' ? candidate[field]?.toLowerCase?.() ?? candidate[field] : candidate[field];
+      if (candidate[field] !== undefined && value !== this.binding[field]) {
         throw steeringError(`agy steering ${field} binding mismatch`, 'AGY_STEER_BINDING_MISMATCH');
       }
     }
