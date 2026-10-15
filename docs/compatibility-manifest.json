@@ -10,7 +10,7 @@
     "maintainedLtsMajors": [22, 24],
     "blockingCi": {
       "majors": [22, 24],
-      "operatingSystems": ["ubuntu-latest", "windows-latest", "macos-latest"]
+      "operatingSystems": ["ubuntu-latest", "windows-latest", "macos-latest", "macos-15-intel"]
     },
     "exploratoryCi": {
       "major": 26,

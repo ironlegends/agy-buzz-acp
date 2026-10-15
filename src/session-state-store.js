@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
-import { constants } from 'node:fs';
-import { chmod, lstat, mkdir, open, readdir } from 'node:fs/promises';
+import { constants, realpathSync } from 'node:fs';
+import { chmod, lstat, mkdir, open, readdir, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { acquireNativeLock } from './native-lock.js';
@@ -10,7 +10,11 @@ const OWNER_RE = /^[0-9a-f]{64}$/i;
 const HASH_RE = /^[0-9a-f]{64}$/;
 export const SESSION_STATE_STORE_MARKER = '.agy-session-state-store';
 const STORE_KIND = 'agy-session-state';
-const INIT_LOCK_DIR = join(tmpdir(), 'agy-buzz-session-state-init-v1');
+const INIT_LOCK_DIR_NAME = 'agy-buzz-session-state-init-v1';
+
+async function initializationLockDirectory() {
+  return join(await realpath(tmpdir()), INIT_LOCK_DIR_NAME);
+}
 
 function storeError(message, code) {
   return Object.assign(new Error(message), { code, rpcMessage: message });
@@ -49,18 +53,18 @@ async function assertNoSymlinkAncestors(target) {
   }
 }
 
-async function ensureInitializationLockDirectory() {
-  await assertNoSymlinkAncestors(INIT_LOCK_DIR);
-  const existing = await lstat(INIT_LOCK_DIR).catch((error) => {
+async function ensureInitializationLockDirectory(dir) {
+  await assertNoSymlinkAncestors(dir);
+  const existing = await lstat(dir).catch((error) => {
     if (error?.code === 'ENOENT') return null;
     throw error;
   });
   if (existing && (!existing.isDirectory() || existing.isSymbolicLink())) {
     throw storeError('agy session state initialization lock directory is unsafe', 'AGY_SESSION_STATE_PATH');
   }
-  if (!existing) await mkdir(INIT_LOCK_DIR, { recursive: true, mode: 0o700 });
-  await chmod(INIT_LOCK_DIR, 0o700);
-  const secured = await lstat(INIT_LOCK_DIR);
+  if (!existing) await mkdir(dir, { recursive: true, mode: 0o700 });
+  await chmod(dir, 0o700);
+  const secured = await lstat(dir);
   if (!secured.isDirectory() || secured.isSymbolicLink() ||
       (process.platform !== 'win32' && (secured.mode & 0o077) !== 0)) {
     throw storeError('agy session state initialization lock directory is unsafe', 'AGY_SESSION_STATE_PATH');
@@ -75,9 +79,10 @@ export async function acquireSessionStateStoreInitializationLock(dir, lockFn = a
   if (typeof dir !== 'string' || !dir.trim() || !isAbsolute(dir) || typeof lockFn !== 'function') {
     throw storeError('agy session state directory is invalid', 'AGY_SESSION_STATE_PATH');
   }
-  await ensureInitializationLockDirectory();
+  const initLockDir = await initializationLockDirectory();
+  await ensureInitializationLockDirectory(initLockDir);
   const lockKey = createHash('sha256').update(resolve(dir).toLowerCase()).digest('hex');
-  return lockFn(join(INIT_LOCK_DIR, `${lockKey}.lock`));
+  return lockFn(join(initLockDir, `${lockKey}.lock`));
 }
 
 export async function readSessionStateFile(path, maxBytes = 64 * 1024, { fsImpl = { lstat, open } } = {}) {
@@ -202,5 +207,5 @@ export function sessionStateStoreMarkerPath(dir) {
 }
 
 export function sessionStateStoreInitLockRoot() {
-  return INIT_LOCK_DIR;
+  return join(realpathSync(tmpdir()), INIT_LOCK_DIR_NAME);
 }

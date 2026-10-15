@@ -13,6 +13,8 @@ This is a community adapter for Buzz. It is not a general-purpose ACP client ada
 
 The JavaScript runtime uses standard Node APIs. Windows has real-provider validation; Linux and macOS require their own provider smoke tests. Automated fixture CI does not prove provider availability, account eligibility, or graphical rendering on every OS.
 
+The adapter targets Windows x64, macOS Apple Silicon and Intel, and Linux x64. Required Node 22/24 CI runs the fixture suite and extracted-package checks, including native file locking, on Windows, Ubuntu and both macOS architectures. Native prebuilds also exist for Windows/Linux ARM64, but their presence alone is not execution evidence for those variants. See the [platform evidence matrix](docs/COMPATIBILITY.md#platform-support-and-evidence) before claiming an installed configuration is validated.
+
 Upgrading from 0.4.x? Read the [0.4.x to 0.5.8 migration guide](docs/MIGRATING_04_TO_05.md) before changing a working installation. Steering is opt-in, but native locks and durable-checkpoint lifecycle changes also apply without steering.
 
 ## Release status

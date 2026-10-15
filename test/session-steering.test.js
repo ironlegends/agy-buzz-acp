@@ -820,12 +820,12 @@ test('advertises and routes the ACP steering extension without accepting a new-t
     app.send({ jsonrpc: '2.0', id: 3, method: 'session/prompt', params: {
       sessionId, prompt: transportPrompt('active')
     } });
-    await new Promise((resolve) => setImmediate(resolve));
+    await app.waitFor(() => promptCalls === 1);
     assert.equal(promptCalls, 1);
     app.send({ jsonrpc: '2.0', id: 4, method: '_session/steering', params: {
       sessionId, prompt: [{ type: 'text', text: 'correct ' }, { type: 'text', text: 'now' }]
     } });
-    await new Promise((resolve) => setImmediate(resolve));
+    await app.waitFor(() => receivedSteerPrompt === 'correct now');
     assert.equal(receivedSteerPrompt, 'correct now');
     resolveSteer({ outcome: 'injected' });
     const response = await app.waitFor((message) => message.id === 4);
