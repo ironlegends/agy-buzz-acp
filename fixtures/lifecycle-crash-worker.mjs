@@ -75,7 +75,7 @@ function lifecyclePrompt() {
 
 async function createServer({ SessionState, DeliveryOutbox, createAcpServer, sessionFactory, publisherFactory }) {
   const state = new SessionState({ dir: stateDir, owner, relay: 'wss://probe.invalid' });
-  const outbox = new DeliveryOutbox({ dir: outboxDir, owner });
+  const outbox = new DeliveryOutbox({ dir: outboxDir, owner, relay: 'wss://probe.invalid' });
   const output = new PassThrough();
   const server = createAcpServer({
     input: new PassThrough(),

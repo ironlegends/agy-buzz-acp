@@ -61,6 +61,17 @@ the stream handler.
 
 ## Notifications
 
+Busy sessions and refused channel ownership or checkpoint transfers return the
+implementation-specific JSON-RPC code `-32003` with a bounded, fixed diagnostic
+message. They do not use ACP's `-32002` resource-not-found code, which Buzz Desktop
+0.5.28 displays as a missing-model error. This classification does not relax the
+ownership, provider-retirement or durable-checkpoint checks.
+
+An unknown `sessionId` in a prompt, model configuration or steering request
+returns `-32602` (invalid params) with the fixed message `unknown session`.
+It is rejected before provider or publication work. It does not use `-32001`,
+which Buzz Desktop classifies as an access denial.
+
 A valid JSON-RPC request with no `id` field is a notification: it is still
 processed (state changes, e.g. `initialize`, still take effect), but no
 response is ever written for it, including on application failure. A

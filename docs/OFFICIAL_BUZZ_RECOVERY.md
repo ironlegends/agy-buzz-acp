@@ -30,6 +30,8 @@ Steering is disabled unless all of the following are true:
 
 `AGY_STEER_ROOT_DIR` may point to a trusted private local directory. The adapter creates channel-scoped bridge state below that root and validates its Windows ACLs. `AGY_STEER_BRIDGE_DIR` and `AGY_STEER_BINDING` are generated and passed to the hook by the adapter; do not set or edit them manually.
 
+`AGY_STEER_WORKSPACE_ROOT` is generated from the resolved provider cwd by `AgySession` only when a coordinator bridge is active; never set it manually. For nonempty provider `workspacePaths`, the hook accepts only one bounded absolute path resolving to this generated root. Missing or empty `workspacePaths` retain the legacy behavior.
+
 The package installs the hook entry point with the other commands. A reviewed agy plugin must call it through a `PostInvocation` command, for example:
 
 ```json
@@ -50,7 +52,7 @@ Use an absolute `node` and adapter path in a real installation. Install the matc
 
 ### Activation procedure
 
-Both activation and rollback require an inactive boundary and a saved local checkpoint. Never modify configuration while a turn is running or while a steering claim is in-flight.
+Both activation and rollback require an inactive boundary and a saved local checkpoint. Never modify configuration while a turn is running or while a steering claim is in-flight. After refreshing the harness catalog, verify the deployed instance's effective arguments as described in [upgrades and rollback](UPGRADING.md); a retained instance override can still select the old adapter.
 
 1. **Stop the affected agent**: In Buzz Desktop, stop the specific agent and verify that its adapter and provider processes are completely retired. Confirm that no active steering claim is pending.
 2. **Save a checkpoint**: Preserve a backup of the existing harness file and active session state for recovery.
@@ -134,6 +136,8 @@ Doctor now examines only steering binding/state metadata, not request text or ac
 The current lifecycle contract keeps the version-1 state record unchanged and stores transfer evidence only in adapter memory. A channel session becomes transferable only after the direct provider has retired, the publication is durably recorded as `sent`, and the channel record is saved as `ready`. One new ACP session may then claim that channel after rereading the ready record and binding its exact conversation ID. The former ACP `sessionId` remains addressable for cleanup but is permanently invalid for that channel; it cannot reclaim its cached conversation or start another provider turn.
 
 Two new ACP sessions cannot claim the same channel concurrently. A claim that is still in preflight reserves the channel, and a live provider, failed retirement, blocked state, or missing ready checkpoint keeps the existing owner in place. A failed transfer leaves the new claimant responsible for its recovery boundary; it does not close or replay the former provider.
+
+Official Buzz can create a new ACP session after an explicit turn cancellation. The same adapter may transfer that channel only after the cancelled turn has settled, the previous provider confirms retirement, the durable scope matches, and the readable outbox has no unresolved delivery. This volatile cancellation proof does not survive adapter restart and does not permit arbitrary blocked-state takeover. The new session accepts a fresh prompt; it never replays the cancelled prompt or tools. If the first turn had no saved conversation, proven empty-record reconciliation starts a new conversation and archives its old steering binding before creating another. An existing validated conversation remains the association for a cancelled later turn.
 
 A blocked record found by a fresh parent is unknown. The adapter leaves the record and any steering bridge unchanged, refuses reconciliation before steering archival, and does not start a provider or publish a reply. The same parent may reconcile only after its own provider close has been observed, or after it proves that it wrote the block before any provider started. A null child reference, a successful kill request, an ownership lock, or the absence of an observable descendant is not that proof. The direct `SessionState.reconcile` operation therefore requires an explicit non-persistent retirement proof.
 

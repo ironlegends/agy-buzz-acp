@@ -11,7 +11,7 @@ const owner='ab'.repeat(32), channelId='123e4567-e89b-42d3-a456-426614174000';
 
 test('outbox listing never mutates a live inflight record', async(t)=>{
   const dir=await mkdtemp(join(tmpdir(),'agy-readonly-list-')); t.after(()=>rm(dir,{recursive:true,force:true}));
-  const box=new DeliveryOutbox({dir,owner});
+  const box=new DeliveryOutbox({dir,owner,relay:'wss://probe.invalid'});
   const id=await box.begin({channelId,replyTo:'f'.repeat(64),content:'synthetic'});
   const before=await readFile(box.path(id),'utf8');
   await box.list();
@@ -19,11 +19,11 @@ test('outbox listing never mutates a live inflight record', async(t)=>{
 });
 test('a concurrent list cannot overwrite a successful publication checkpoint',async(t)=>{
   const dir=await mkdtemp(join(tmpdir(),'agy-list-race-'));t.after(()=>rm(dir,{recursive:true,force:true}));
-  const box=new DeliveryOutbox({dir,owner});
+  const box=new DeliveryOutbox({dir,owner,relay:'wss://probe.invalid'});
   const id=await box.begin({channelId,replyTo:'f'.repeat(64),content:'synthetic'});
-  const raw=box.readRaw.bind(box);let entered,release,intercept=true;
+  const raw=box._readRecord.bind(box);let entered,release,intercept=true;
   const ready=new Promise(r=>{entered=r;}),gate=new Promise(r=>{release=r;});
-  box.readRaw=async(key)=>{const record=await raw(key);if(intercept){intercept=false;entered();await gate;}return record;};
+  box._readRecord=async(key,options)=>{const record=await raw(key,options);if(intercept){intercept=false;entered();await gate;}return record;};
   const scan=box.list();await ready;
   await box.update(id,{status:'sent',eventId:'c'.repeat(64)});release();await scan;
   assert.equal((await raw(id)).status,'sent');assert.equal((await raw(id)).eventId,'c'.repeat(64));

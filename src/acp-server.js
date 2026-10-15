@@ -1,19 +1,24 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { promptToText } from './prompt.js';
-import { AgySession } from './agy-session.js';
+import { AgySession, PINNED_MODEL } from './agy-session.js';
 import { parseBuzzContext, buzzContextFailure } from './buzz-context.js';
 import { BuzzPublisher } from './buzz-publisher.js';
 import { createConfiguredOutbox } from './delivery/outbox.js';
 import { getBuzzPublicKey } from './delivery/identity.js';
 import { ownershipFailureReason, createConfiguredSessionState } from './session-state.js';
+import { canonicalChannelId } from './session-state-store.js';
 import { listModels, modelConfigOptions } from './models.js';
 import { createSteeringCoordinator, inspectSteeringBridge, reconcileSteeringBridge, MAX_STEERING_TEXT_LENGTH, readBooleanFlag } from './steering.js';
 import { attachLineDecoder, FRAME_TOO_LARGE, FRAME_INVALID_UTF8, resolveFrameLimits } from './frame-codec.js';
 
 const JSON_RPC = '2.0';
+const ADAPTER_VERSION = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
 const TERMINAL_SESSION_CONTEXT_MESSAGE = 'agy session context lost; resume unsupported';
+// Implementation-specific conflict: ACP reserves -32002 for resource-not-found.
+const SESSION_CONFLICT_RPC_CODE = -32003;
 const STEERING_RPC_CODE = -32004;
 const STEERING_UNCERTAIN_MESSAGE = 'agy steering outcome is uncertain';
 const OWNER_RE = /^[0-9a-f]{64}$/i;
@@ -80,7 +85,10 @@ export function describePromptShape(prompt) {
   return `blocks=${prompt.length} ${blocks.join(' ; ')}`;
 }
 
-export function createAcpServer({ input = process.stdin, output = process.stdout, diagnostics = process.stderr, sessionFactory, publisherFactory, outboxFactory, identityFactory, sessionStateFactory, modelCatalogFactory, steeringFactory, steeringConfig, steeringSupported, frameLimits = {} } = {}) {
+export function createAcpServer({ input = process.stdin, output = process.stdout, diagnostics = process.stderr, sessionFactory, publisherFactory, outboxFactory, identityFactory, sessionStateFactory, modelCatalogFactory, steeringFactory, steeringConfig, steeringSupported, frameLimits = {}, shutdownTimeoutMs = 5000 } = {}) {
+  if (!Number.isInteger(shutdownTimeoutMs) || shutdownTimeoutMs < 1 || shutdownTimeoutMs > 60_000) {
+    throw new TypeError('shutdownTimeoutMs must be a bounded positive integer');
+  }
   const resolvedFrameLimits = resolveFrameLimits(frameLimits);
   const maxFrameBytes = resolvedFrameLimits.maxFrameBytes;
   const sessions = new Map();
@@ -119,6 +127,8 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
   let initialized = false;
   let closing = false;
   function steeringLocation(channelId) {
+    channelId = canonicalChannelId(channelId);
+    if (!channelId) throw steeringRpcError('agy steering channel is invalid', -32602);
     const ownerId = resolvedSteeringConfig.ownerId ?? sessionState?.owner;
     const rootDir = resolvedSteeringConfig.rootDir ?? join(tmpdir(), 'agy-buzz-steering');
     const bridgeKey = createHash('sha256').update(`${ownerId ?? 'test'}:${channelId}`).digest('hex');
@@ -142,14 +152,21 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
   // only durable condition inert in the default configuration, where the outbox
   // is off, and every test of reconciliation ran in exactly that configuration.
   const unsettledDeliveryRefusal = async (channelId) => {
-    if (!outbox?.enabled || typeof outbox.list !== 'function') return 'delivery outbox is disabled';
-    let records;
-    try { records = await outbox.list(); }
-    catch { return 'delivery outbox is unreadable'; }
-    return records.some((record) => record?.channelId === channelId &&
-      (record.status === 'uncertain' || record.status === 'inflight'))
-      ? 'an unsettled delivery is waiting'
-      : null;
+    if (!outbox?.enabled) return 'delivery outbox is disabled';
+    try {
+      if (typeof outbox.hasUnsettledDelivery === 'function') {
+        const unsettled = await outbox.hasUnsettledDelivery(channelId);
+        if (typeof unsettled !== 'boolean') return 'delivery outbox is unreadable';
+        return unsettled ? 'an unsettled delivery is waiting' : null;
+      }
+      // Compatibility for injected outbox implementations. The production store
+      // uses the complete streaming scan, independent of operator pagination.
+      if (typeof outbox.list !== 'function') return 'delivery outbox is disabled';
+      const records = await outbox.list();
+      return records.some((record) => record?.channelId?.toLowerCase() === channelId.toLowerCase() &&
+        (record.status === 'uncertain' || record.status === 'inflight' || record.status === 'failed-before-start'))
+        ? 'an unsettled delivery is waiting' : null;
+    } catch { return 'delivery outbox is unreadable'; }
   };
 
   // In-process half of the reconciliation guard. The other half is the session
@@ -301,7 +318,7 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
             mcpCapabilities: { http: false, sse: false }
           },
           _meta: { steering: { supported: steeringCapability } },
-            agentInfo: { name: 'agy-buzz-acp', version: '0.5.10' }
+            agentInfo: { name: 'agy-buzz-acp', version: ADAPTER_VERSION }
         }));
         return;
       }
@@ -314,7 +331,7 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
         if (Object.prototype.hasOwnProperty.call(params, 'model')) {
           throw Object.assign(new Error('model override is not supported'), { rpcCode: -32602 });
         }
-        const configuredModel = process.env.AGY_MODEL ?? 'gemini-3.8-flash-high';
+        const configuredModel = process.env.AGY_MODEL ?? PINNED_MODEL;
         let catalog;
         try {
           const result = await getModelCatalog({ command: modelCommand, cwd: params.cwd, prefixArgs: modelPrefixArgs });
@@ -349,14 +366,17 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
           model: requestedModel, modelCatalog: catalog, bound: false, stateError: null,
           steering: null, systemPrompt, needsReplacement: false, cachedConversationBound: false,
           providerEverStarted: false, blockCreatedByThisParent: false,
-          safeToTransfer: false, channelTransferInvalidated: false });
+          safeToTransfer: false, channelTransferInvalidated: false,
+          explicitCancelSettled: false });
         if (id !== undefined) write(rpcResult(id, { sessionId, configOptions: modelConfigOptions(catalog, requestedModel) }));
         return;
       }
       if (message.method === 'session/set_config_option') {
         const entry = sessions.get(params.sessionId);
-        if (!entry) throw Object.assign(new Error('unknown session'), { rpcCode: -32001 });
-        if (activeTurns.has(params.sessionId)) throw Object.assign(new Error('session turn is busy'), { rpcCode: -32002 });
+        if (!entry) throw Object.assign(new Error('unknown session'), { rpcCode: -32602, rpcMessage: 'unknown session' });
+        if (activeTurns.has(params.sessionId)) throw Object.assign(new Error('session turn is busy'), {
+          rpcCode: SESSION_CONFLICT_RPC_CODE, rpcMessage: 'session turn is busy'
+        });
         const configId = params.configId ?? params.id;
         if (configId !== 'model') throw Object.assign(new Error('unknown config option'), { rpcCode: -32602 });
         const value = params.value;
@@ -373,7 +393,7 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
       }
       if (message.method === '_session/steering') {
         const entry = sessions.get(params.sessionId);
-        if (!entry) throw Object.assign(new Error('unknown session'), { rpcCode: -32001 });
+        if (!entry) throw Object.assign(new Error('unknown session'), { rpcCode: -32602, rpcMessage: 'unknown session' });
         if (!steeringCapability || !entry.steering || typeof entry.session.steer !== 'function') {
           throw steeringRpcError('agy steering is unavailable without a confirmed dedicated hook');
         }
@@ -387,13 +407,15 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
       if (message.method === 'session/prompt') {
         if (Object.prototype.hasOwnProperty.call(params, 'model')) throw Object.assign(new Error('model override is not supported'), { rpcCode: -32602 });
         const entry = sessions.get(params.sessionId);
-        if (!entry) throw Object.assign(new Error('unknown session'), { rpcCode: -32001 });
+        if (!entry) throw Object.assign(new Error('unknown session'), { rpcCode: -32602, rpcMessage: 'unknown session' });
         let session = entry.session;
-        if (activeTurns.has(params.sessionId)) throw Object.assign(new Error('session turn is busy'), { rpcCode: -32002 });
+        if (activeTurns.has(params.sessionId)) throw Object.assign(new Error('session turn is busy'), {
+          rpcCode: SESSION_CONFLICT_RPC_CODE, rpcMessage: 'session turn is busy'
+        });
         if (entry.stateError) throw Object.assign(new Error(entry.stateError), { rpcCode: -32603, rpcMessage: entry.stateError });
         if (entry.channelTransferInvalidated) {
           throw Object.assign(new Error('agy ACP session no longer owns the channel'), {
-            rpcCode: -32002, rpcMessage: 'agy ACP session no longer owns the channel'
+            rpcCode: SESSION_CONFLICT_RPC_CODE, rpcMessage: 'agy ACP session no longer owns the channel'
           });
         }
         const text = promptToText(params.prompt);
@@ -409,11 +431,15 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
         }
         entry.channelId ??= buzzContext.channelId;
         // Reserve before the first await, including steering inspection/recovery.
+        entry.explicitCancelSettled = false;
         const controller = new AbortController();
         activeTurns.set(params.sessionId, controller);
         let stateScope = null;
         let transferFrom = null;
         let transferCommitted = false;
+        let explicitCancelTransfer = false;
+        let explicitCancelNeedsSteeringArchive = false;
+        let explicitCancelClearedCheckpoint = false;
         let directProviderRetired = false;
         const ownershipPreviouslyHeld = sessionState?.ownsChannel?.(buzzContext.channelId) !== false;
         try {
@@ -429,21 +455,83 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
             const existingSessionId = channelSessions.get(buzzContext.channelId);
             if (existingSessionId && existingSessionId !== params.sessionId) {
               const existingEntry = sessions.get(existingSessionId);
-              const transferable = Boolean(existingEntry && existingEntry.safeToTransfer &&
-                !existingEntry.channelTransferInvalidated && !existingEntry.needsReplacement &&
+              const explicitCancelRecovery = Boolean(existingEntry &&
+                existingEntry.explicitCancelSettled && existingEntry.needsReplacement &&
+                existingEntry.channelId === buzzContext.channelId);
+              const safeCheckpointTransfer = Boolean(existingEntry?.safeToTransfer &&
+                !existingEntry.needsReplacement);
+              const transferable = Boolean(existingEntry &&
+                !existingEntry.channelTransferInvalidated &&
                 !existingEntry.stateError && !activeTurns.has(existingSessionId) &&
-                !channelsWithLiveBlock.has(buzzContext.channelId));
+                !channelsWithLiveBlock.has(buzzContext.channelId) &&
+                (safeCheckpointTransfer || explicitCancelRecovery));
               if (!transferable) {
                 throw Object.assign(new Error('agy channel session is already owned'), {
-                  rpcCode: -32002, rpcMessage: 'agy channel session is already owned'
+                  rpcCode: SESSION_CONFLICT_RPC_CODE, rpcMessage: 'agy channel session is already owned'
                 });
               }
-              const deliveryRefusal = await unsettledDeliveryRefusal(buzzContext.channelId);
-              if (deliveryRefusal) {
-                report(`channel transfer refused channel=${buzzContext.channelId} reason=${deliveryRefusal}`);
-                throw Object.assign(new Error('agy channel session transfer is not yet safe'), {
-                  rpcCode: -32002, rpcMessage: 'agy channel session transfer is not yet safe'
-                });
+              if (explicitCancelRecovery) {
+                // Read through the ordinary scoped loader before retiring the old
+                // provider. A blocked result proves this is the durable record for
+                // this exact canonical scope; mismatched, missing, or unreadable
+                // records leave the previous ACP owner and provider untouched.
+                let cancelledCheckpoint = false;
+                try {
+                  const saved = await sessionState.load(stateScope);
+                  if (!saved) {
+                    throw Object.assign(new Error('agy cancelled session has no durable checkpoint'), {
+                      rpcCode: SESSION_CONFLICT_RPC_CODE, rpcMessage: 'agy cancelled session has no durable checkpoint'
+                    });
+                  }
+                } catch (error) {
+                  if (error?.code !== 'AGY_SESSION_STATE_BLOCKED') throw error;
+                  cancelledCheckpoint = true;
+                }
+                if (!cancelledCheckpoint) {
+                  throw Object.assign(new Error('agy cancelled session checkpoint is not blocked'), {
+                    rpcCode: SESSION_CONFLICT_RPC_CODE, rpcMessage: 'agy cancelled session checkpoint is not blocked'
+                  });
+                }
+                if (existingEntry.steering?.enabled && !steeringFactory) {
+                  if (typeof sessionState.path !== 'function') {
+                    throw steeringRpcError('agy steering recovery cannot validate the durable session record');
+                  }
+                  let blockedRecord;
+                  try {
+                    blockedRecord = JSON.parse(readFileSync(sessionState.path(buzzContext.channelId), 'utf8'));
+                  } catch {
+                    throw steeringRpcError('agy steering recovery cannot validate the durable session record');
+                  }
+                  if (blockedRecord?.status !== 'blocked' ||
+                      !Object.prototype.hasOwnProperty.call(blockedRecord, 'conversationId')) {
+                    throw steeringRpcError('agy steering recovery cannot validate the durable session record');
+                  }
+                  // The loader above validated schema and exact scope. This read only
+                  // decides whether an orphaned first-turn binding must be blocked
+                  // before reconciliation removes its empty durable association.
+                  explicitCancelNeedsSteeringArchive = blockedRecord.conversationId === null;
+                }
+                const refusal = await reconciliationRefusal(buzzContext.channelId, params.sessionId);
+                if (refusal) {
+                  report(`session recovery refused channel=${buzzContext.channelId} reason=${refusal}`);
+                  throw Object.assign(new Error('agy session state is blocked after an incomplete turn'), {
+                    rpcMessage: 'agy session state is blocked after an incomplete turn'
+                  });
+                }
+                if (typeof existingEntry.session.retireForRecovery !== 'function' ||
+                    await existingEntry.session.retireForRecovery() !== true) {
+                  throw steeringRpcError('agy provider retirement could not be confirmed');
+                }
+                explicitCancelTransfer = true;
+                directProviderRetired = true;
+              } else {
+                const deliveryRefusal = await unsettledDeliveryRefusal(buzzContext.channelId);
+                if (deliveryRefusal) {
+                  report(`channel transfer refused channel=${buzzContext.channelId} reason=${deliveryRefusal}`);
+                  throw Object.assign(new Error('agy channel session transfer is not yet safe'), {
+                    rpcCode: SESSION_CONFLICT_RPC_CODE, rpcMessage: 'agy channel session transfer is not yet safe'
+                  });
+                }
               }
               transferFrom = existingEntry;
             }
@@ -489,14 +577,30 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
                 throw error;
               }
               directProviderRetired = true;
+              if (explicitCancelTransfer && explicitCancelNeedsSteeringArchive &&
+                  transferFrom?.steering?.enabled) {
+                try {
+                  await transferFrom.steering.block(
+                    'cancelled provider retired without a durable conversation checkpoint',
+                  );
+                } catch {
+                  throw steeringRpcError('agy steering binding could not be blocked for empty conversation recovery');
+                }
+              }
               const outcome = await sessionState.reconcile(stateScope, { directProviderRetired: true });
               if (!outcome.reconciled) throw error;
+              if (explicitCancelTransfer && outcome.conversationId === null) {
+                explicitCancelClearedCheckpoint = true;
+              }
               report(`session record reconciled channel=${buzzContext.channelId} conversation=${outcome.conversationId ?? 'none'}`);
               saved = await sessionState.load(stateScope);
             }
-            if (transferFrom && (!saved || saved.status !== 'ready')) {
+            const explicitCancelWithoutConversation = Boolean(
+              explicitCancelTransfer && explicitCancelClearedCheckpoint && !saved,
+            );
+            if (transferFrom && (!saved || saved.status !== 'ready') && !explicitCancelWithoutConversation) {
               throw Object.assign(new Error('agy channel session transfer requires a ready checkpoint'), {
-                rpcCode: -32002, rpcMessage: 'agy channel session transfer requires a ready checkpoint'
+                rpcCode: SESSION_CONFLICT_RPC_CODE, rpcMessage: 'agy channel session transfer requires a ready checkpoint'
               });
             }
             if (transferFrom) {
@@ -504,6 +608,7 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
               // is irrevocably stale once the durable ready checkpoint is reread.
               transferFrom.safeToTransfer = false;
               transferFrom.channelTransferInvalidated = true;
+              transferFrom.explicitCancelSettled = false;
               transferCommitted = true;
             }
             // A blocked record observed as ready or reconciled no longer carries a
@@ -717,11 +822,19 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
           }
           activeTurns.delete(params.sessionId);
           settleLiveBlock(buzzContext.channelId, params.sessionId);
+          if (providerStarted && !turnSafe && controller.signal.aborted &&
+              controller.explicitCancelRequested && !channelsWithLiveBlock.has(buzzContext.channelId)) {
+            entry.explicitCancelSettled = true;
+          }
         }
         return;
       }
       if (message.method === 'session/cancel') {
-        activeTurns.get(params.sessionId)?.abort();
+        const controller = activeTurns.get(params.sessionId);
+        if (controller) {
+          controller.explicitCancelRequested = true;
+          controller.abort();
+        }
         sessions.get(params.sessionId)?.session?.cancel();
         return;
       }
@@ -765,16 +878,36 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
   async function close() {
     if (closePromise) return closePromise;
     closePromise = (async () => {
-    closing = true;
-    for (const controller of activeTurns.values()) controller.abort();
-    for (const entry of sessions.values()) entry.session.close?.();
-    await Promise.allSettled([...activeHandles]);
-    await Promise.allSettled([...sessions.values()].map((entry) => entry.session.waitForClose?.()));
-    await sessionState?.release?.();
+      closing = true;
+      const unconfirmed = () => Object.assign(new Error('agy shutdown could not confirm provider exit; ownership retained'),
+        { code: 'AGY_SHUTDOWN_UNCONFIRMED' });
+      let timer;
+      try {
+        for (const controller of activeTurns.values()) controller.abort();
+        for (const entry of sessions.values()) entry.session.close?.();
+        const settled = (async () => {
+          await Promise.allSettled([...activeHandles]);
+          const results = await Promise.allSettled([...sessions.values()].map((entry) => entry.session.waitForClose?.()));
+          if (results.some(result => result.status === 'rejected')) throw unconfirmed();
+        })();
+        await Promise.race([settled, new Promise((_, reject) => {
+          timer = setTimeout(() => reject(unconfirmed()), shutdownTimeoutMs);
+        })]);
+      } catch {
+        // Sending a kill signal is not exit proof. Keep all leases if shutdown
+        // times out or a provider rejects its close confirmation.
+        throw unconfirmed();
+      } finally { clearTimeout(timer); }
+      await sessionState?.release?.();
     })();
     return closePromise;
   }
-  input.on('end', () => { void close(); });
+  input.on('end', () => {
+    void close().catch(() => {
+      report('shutdown could not confirm provider exit; ownership retained');
+      if (input === process.stdin) process.exitCode = 2;
+    });
+  });
   async function retryDelivery(recoveryId) {
     const record = recoveries.get(recoveryId);
     if (!record || record.status !== 'failed-before-start') return { status: 'blocked' };

@@ -2,6 +2,8 @@ import test, { mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 import { AgySession } from '../src/agy-session.js';
 import { createAcpServer } from '../src/acp-server.js';
 import { isolatedServerOptions } from '../scripts/environment-support.js';
@@ -193,6 +195,72 @@ test('passes the private bridge to the child and publishes only the final correc
   assert.deepEqual(await steer, { outcome: 'injected', steerId: 'steer-1', sequence: 1, userInputStep: 5 });
   assert.equal(await turn, 'HOOK');
   assert.equal(child.killCalls, 0, 'steering must not cancel the provider');
+  session.close();
+});
+
+test('strips inherited workspace scope and passes only the resolved steering session cwd', () => {
+  const names = ['AGY_STEER_WORKSPACE_ROOT', 'AGY_STEER_BRIDGE_DIR', 'AGY_STEER_BINDING'];
+  const previous = new Map(names.map((name) => [name, process.env[name]]));
+  process.env.AGY_STEER_WORKSPACE_ROOT = 'C:\\spoofed-parent-workspace';
+  process.env.AGY_STEER_BRIDGE_DIR = 'C:\\spoofed-parent-bridge';
+  process.env.AGY_STEER_BINDING = 'spoofed-parent-token';
+  try {
+    let noSteeringOptions;
+    const noSteering = new AgySession({ spawnFn: (_command, _args, options) => {
+      noSteeringOptions = options;
+      return fakeChild();
+    } });
+    noSteering.ensureStarted();
+    assert.equal(noSteeringOptions.env.AGY_STEER_WORKSPACE_ROOT, undefined);
+    assert.equal(noSteeringOptions.env.AGY_STEER_BRIDGE_DIR, undefined);
+    assert.equal(noSteeringOptions.env.AGY_STEER_BINDING, undefined);
+    noSteering.close();
+
+    const coordinator = fakeCoordinator();
+    const bridge = coordinator.bridgeEnv();
+    coordinator.bridgeEnv = () => ({ ...bridge, AGY_STEER_WORKSPACE_ROOT: 'C:\\spoofed-coordinator-root' });
+    const cwd = join(tmpdir(), 'agy-provider-workspace');
+    let steeringOptions;
+    const steering = new AgySession({ cwd, steeringCoordinator: coordinator,
+      spawnFn: (_command, _args, options) => {
+        steeringOptions = options;
+        return fakeChild();
+      } });
+    steering.ensureStarted();
+    assert.equal(steeringOptions.cwd, cwd);
+    assert.equal(steeringOptions.env.AGY_STEER_BRIDGE_DIR, bridge.AGY_STEER_BRIDGE_DIR);
+    assert.equal(steeringOptions.env.AGY_STEER_BINDING, bridge.AGY_STEER_BINDING);
+    assert.equal(steeringOptions.env.AGY_STEER_WORKSPACE_ROOT, resolve(cwd));
+    steering.close();
+  } finally {
+    for (const name of names) {
+      const value = previous.get(name);
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+});
+
+test('bounds the final steering segment that is returned', async () => {
+  const child = fakeChild();
+  const coordinator = fakeCoordinator();
+  const session = new AgySession({ steeringCoordinator: coordinator, spawnFn: () => child,
+    frameLimits: { maxResponseBytes: 4 } });
+  const turn = session.prompt('base', () => {});
+
+  emit(child, { event: 'init', conversation_id: conversationId });
+  emitUserInput(child, 2);
+  const steer = session.steer('correct the answer');
+  emitUserInput(child, 5);
+  emit(child, { event: 'step_update', step_update: {
+    step_type: 'agent_response', text_delta: '😀', conversation_id: conversationId, step_index: 6
+  } });
+  emit(child, { event: 'result', result: {
+    status: 'SUCCESS', conversation_id: conversationId, response: 'provider aggregate that is not returned'
+  } });
+
+  assert.deepEqual(await steer, { outcome: 'injected', steerId: 'steer-1', sequence: 1, userInputStep: 5 });
+  assert.equal(await turn, '😀');
   session.close();
 });
 

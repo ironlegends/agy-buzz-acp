@@ -1,0 +1,165 @@
+{
+  "manifestVersion": 1,
+  "observedAt": "2026-10-15",
+  "candidate": {
+    "version": "0.6.0",
+    "status": "unreleased"
+  },
+  "nodeSupport": {
+    "engine": ">=22",
+    "maintainedLtsMajors": [22, 24],
+    "blockingCi": {
+      "majors": [22, 24],
+      "operatingSystems": ["ubuntu-latest", "windows-latest", "macos-latest"]
+    },
+    "exploratoryCi": {
+      "major": 26,
+      "blocking": false,
+      "operatingSystems": ["ubuntu-latest", "windows-latest", "macos-latest"]
+    },
+    "localObservedVersion": "24.14.0"
+  },
+  "environmentObservations": {
+    "antigravityCli": {
+      "priorObservation": {
+        "observedVersion": "1.3.3",
+        "observedAt": "2026-10-15",
+        "modelsCommand": {
+          "verifiedModelCount": 6
+        },
+        "fullTurn": "not-run-during-this-observation"
+      },
+      "canary": {
+        "observedVersion": "1.3.5",
+        "binarySha256": "4790560754318d0ced2358d13cbce9181dfc51d1964c3d95c9776e8eaf5cd3c4",
+        "observedAt": "2026-10-15",
+        "runtime": {
+          "node": "24.14.0",
+          "platform": "win32"
+        },
+        "modelsCommand": {
+          "verifiedModelCount": 6
+        },
+        "acp": {
+          "initialize": "passed",
+          "normalTurn": "passed",
+          "checkpointResume": "passed-same-conversation",
+          "cancel": "passed",
+          "eventsObserved": [
+            "init",
+            "result",
+            "step_update:agent_response",
+            "step_update:system_message",
+            "step_update:user_input"
+          ]
+        },
+        "publisher": {
+          "mode": "fake",
+          "fakePublications": 2,
+          "realPublications": 0
+        },
+        "steering": {
+          "status": "not-run",
+          "reason": "requires-dedicated-hook"
+        }
+      },
+      "versionChangeProvenance": "Version 1.3.5 was observed after the earlier 1.3.3 observation; no explicit update command was recorded."
+    },
+    "buzzDesktop": {
+      "installedFileVersion": {
+        "value": "0.5.28",
+        "source": "fileVersion"
+      },
+      "binarySha256": "be4b5abbf7ef635988c4151f5cec4c345bb0c108bf354a01be6ac2a586faeeec",
+      "updateMethod": "official-desktop-updater",
+      "previousInstalledFileVersion": "0.5.26",
+      "registryVersion": {
+        "value": "0.5.23",
+        "status": "historical-before-desktop-update"
+      },
+      "latestObservedVersion": {
+        "value": "0.5.28",
+        "installed": true,
+        "tested": true
+      },
+      "candidateInstalled": true
+    },
+    "installedBuzzCanary": {
+      "status": "completed",
+      "platform": "win32",
+      "node": "24.14.0",
+      "agy": "1.3.5",
+      "buzzDesktop": "0.5.28",
+      "runtimeCommit": "1b44f2fa0ef71eb76adc6fa7dcbb8d6a496822a4",
+      "archiveSha256": "6038b50c7dc6661c5223b22e53e054f30c1e8a976475f347669ac8d14a699da7",
+      "scope": "dedicated-managed-canary-and-private-synthetic-stores",
+      "realRelayDelivery": "acknowledged-and-desktop-thread-readback",
+      "activityTranscript": "visually-inspected",
+      "steering": "passed-without-cancellation-or-fallback",
+      "steeringHookRouter": "forward-only-without-instrumentation",
+      "explicitFirstTurnCancellation": "passed-with-fresh-conversation-recovery",
+      "explicitCheckpointCancellation": "passed-with-same-conversation-recovery",
+      "desktopRestart": "passed-with-same-conversation-resume",
+      "evidenceRevisions": {
+        "firstTurnCancellation": "654b53fccca3a52e3c72152f65f56ef9dda0ce3d",
+        "checkpointCancellation": "654b53fccca3a52e3c72152f65f56ef9dda0ce3d",
+        "restartAndSteering": [
+          "654b53fccca3a52e3c72152f65f56ef9dda0ce3d",
+          "291ba44ec7ab2da094a57a46b7053ea3c9b405cb",
+          "1b44f2fa0ef71eb76adc6fa7dcbb8d6a496822a4"
+        ],
+        "revisionChange": "conflict-error-classification-and-unknown-session-invalid-params-only"
+      },
+      "productionProcessIdentitiesPreserved": 11,
+      "endurance": {
+        "startedAt": "2026-10-15T16:26:46.8460000Z",
+        "lastSuccessfulTurnAt": "2026-10-15T17:27:30.8120000Z",
+        "measuredDurationMinutes": 60.733,
+        "successfulTurns": 24,
+        "duplicateMarkers": 0,
+        "duplicateEventIds": 0,
+        "obsoleteFinalResponses": 0,
+        "cancelledFinalResponses": 0,
+        "unresolvedDeliveries": 0,
+        "sameReadyConversation": true,
+        "runtimeRevisions": [
+          {
+            "commit": "654b53fccca3a52e3c72152f65f56ef9dda0ce3d",
+            "successfulTurns": 6
+          },
+          {
+            "commit": "291ba44ec7ab2da094a57a46b7053ea3c9b405cb",
+            "successfulTurns": 11
+          },
+          {
+            "commit": "1b44f2fa0ef71eb76adc6fa7dcbb8d6a496822a4",
+            "successfulTurns": 7
+          }
+        ],
+        "sampling": "process-and-state-samples-with-per-turn-traces; replacement-observer-UTC-boundary-corrected; not-continuous"
+      }
+    }
+  },
+  "protocols": {
+    "acp": {
+      "version": 1
+    },
+    "checkpoint": {
+      "currentRecordVersion": 1,
+      "canonicalStoreVersion": 1,
+      "canonicalStoreStatus": "implemented-unreleased"
+    },
+    "outbox": {
+      "legacyVersion": 1,
+      "currentWriteVersion": 2,
+      "bindingStatus": "implemented-unreleased",
+      "legacyPromotion": "refused-without-independent-provenance"
+    }
+  },
+  "claims": {
+    "isolatedProviderCanaryCompleted": true,
+    "realBuzzPublicationVerified": true,
+    "candidateBuzzInstallationVerified": true,
+    "futureProviderCompatibilityPromised": false
+  }
+}

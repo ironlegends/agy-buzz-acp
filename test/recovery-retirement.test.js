@@ -37,7 +37,7 @@ test('unconfirmed retirement prevents disk reconciliation and concurrent recover
   const dir = await mkdtemp(join(tmpdir(), 'agy-unclosed-'));
   const owner = 'ab'.repeat(32), channelId = '123e4567-e89b-42d3-a456-426614174000';
   const state = new SessionState({ dir: join(dir, 'sessions'), owner, relay: 'wss://probe.invalid' });
-  const outbox = new DeliveryOutbox({ dir: join(dir, 'outbox'), owner });
+  const outbox = new DeliveryOutbox({ dir: join(dir, 'outbox'), owner, relay: 'wss://probe.invalid' });
   const c = hungChild(); let spawned = false;
   const s = new AgySession({ spawnFn: () => { spawned = true; return c; }, retireTimeoutMs: 150 });
   const output = new PassThrough(); let wire = ''; output.on('data', (v) => { wire += v; });
@@ -60,7 +60,7 @@ test('unconfirmed retirement prevents disk reconciliation and concurrent recover
     const before = await readFile(state.path(channelId),'utf8');
     const recovery = rpc(4,'session/prompt',params);
     await rpc(5,'session/prompt',params);
-    assert.equal(response(5).error.code, -32002);
+    assert.equal(response(5).error.code, -32003);
     await recovery; assert.match(response(4).error.message,/close.*timed out/);
     assert.equal(await readFile(state.path(channelId),'utf8'),before);
     assert.equal((await readdir(join(dir,'steering'))).some((v) => v.includes('-archived-')), false);
@@ -69,7 +69,7 @@ test('unconfirmed retirement prevents disk reconciliation and concurrent recover
     await rpc(6,'session/new',{ cwd:dir });
     const otherSessionId = [...server.sessions.keys()].at(-1);
     await rpc(7,'session/prompt',{ ...params, sessionId: otherSessionId });
-    assert.equal(response(7).error.code, -32002);
+    assert.equal(response(7).error.code, -32003);
     assert.equal(await readFile(state.path(channelId),'utf8'),before);
 
   } finally { c.emit('close',1); await server.close(); await state.release(); await rm(dir,{ recursive:true,force:true }); }

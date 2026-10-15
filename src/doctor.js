@@ -1,4 +1,5 @@
 import { inspectSteeringDiagnostics } from './steering-diagnostics.js';
+import { createHash } from 'node:crypto';
 import { constants as fsConstants, readFileSync } from 'node:fs';
 import { access, lstat, open, readdir, readFile, stat } from 'node:fs/promises';
 import { spawn as nodeSpawn } from 'node:child_process';
@@ -12,7 +13,7 @@ const PACKAGE_METADATA = JSON.parse(readFileSync(new URL('../package.json', impo
 export const DOCTOR_VERSION = PACKAGE_METADATA.version;
 export const DEFAULT_TIMEOUT_MS = 3000;
 export const MAX_TIMEOUT_MS = 10000;
-export const NODE_MINIMUM_MAJOR = 20;
+export const NODE_MINIMUM_MAJOR = 22;
 export const LATEST_RELEASE_URL = 'https://api.github.com/repos/ironlegends/agy-buzz-acp/releases/latest';
 export const MAX_HARNESS_BYTES = 64 * 1024;
 export const MAX_RELEASE_BODY_BYTES = 64 * 1024;
@@ -88,6 +89,24 @@ async function inspectHarness(value, { fsImpl, cwd = process.cwd(), platform = p
     adapter && adapterName === 'agy-buzz-acp.js' && adapterDir === 'bin' && args.length === 1 &&
     typeof harness.command === 'string' && agy && buzz);
   if (!shapeValid) return { report: { ...harnessBase(), message: 'Harness is not a supported agy-buzz-acp setup document' }, env };
+
+  const accessibleRegularFile = async (path, mode) => {
+    try {
+      const details = await fsImpl.lstat(path);
+      if (details?.isSymbolicLink?.() || !details?.isFile?.()) return false;
+      await fsImpl.access(path, mode);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const nodeMode = platform === 'win32' ? fsConstants.R_OK : fsConstants.X_OK;
+  if (!await accessibleRegularFile(node.value, nodeMode)) {
+    return { report: { ...harnessBase(), message: 'Harness Node executable is not a regular accessible file' }, env };
+  }
+  if (!await accessibleRegularFile(adapter.value, fsConstants.R_OK)) {
+    return { report: { ...harnessBase(), message: 'Harness adapter is not a regular readable file' }, env };
+  }
 
   let configuredVersion = null;
   try {
@@ -192,10 +211,10 @@ function canonicalRelay(value) {
   }
 }
 
-function inspectSessionRelay(env, sessionConfigured) {
+function inspectSessionRelay(env, sessionConfigured, label = 'durable session state') {
   if (!sessionConfigured) return { configured: false, status: 'pass', message: 'Session relay prerequisite is inactive' };
   if (!hasValue(env, 'BUZZ_RELAY_URL')) {
-    return { configured: false, status: 'fail', message: 'BUZZ_RELAY_URL is required when durable session state is enabled' };
+    return { configured: false, status: 'fail', message: `BUZZ_RELAY_URL is required when ${label} is enabled` };
   }
   const buzzRelay = canonicalRelay(env.BUZZ_RELAY_URL);
   if (!buzzRelay) return { configured: true, status: 'fail', message: 'BUZZ_RELAY_URL is malformed or contains unsupported credentials' };
@@ -260,17 +279,16 @@ async function inspectCommand(id, variable, defaultCommand, { env, platform, fsI
   const capabilities = {};
   if (checkCapabilities && nodeSupported && !rejected && executable) {
     const safeFlags = variable === 'BUZZ_CLI_COMMAND' ? ['--help'] : ['--version', '--help'];
+    let capabilityFailed = false;
     for (const flag of safeFlags) {
       const result = await capabilityCheck(executable?.path ?? command, flag, { cwd, env, timeoutMs, spawnImpl });
       capabilities[flag.slice(2)] = result;
       if (result.status === 'fail') {
-        status = 'fail';
-        message = `${variable} capability check failed`;
-      } else {
-        status = 'pass';
-        message = `${variable} responds to safe capability checks`;
+        capabilityFailed = true;
       }
     }
+    status = capabilityFailed ? 'fail' : 'pass';
+    message = capabilityFailed ? `${variable} capability check failed` : `${variable} responds to safe capability checks`;
   }
   return { command: executable?.path ?? null, configured, path: executable?.path ?? null, source: executable?.source ?? null, status, message, ...(checkCapabilities ? { capabilities } : {}) };
 }
@@ -312,6 +330,8 @@ async function inspectStore(env, directoryKey, ownerKey, label, fsImpl, platform
 async function inspectState(env, fsImpl, platform, { processAliveImpl } = {}) {
   const sessionConfigured = hasValue(env, 'AGY_SESSION_DIR') || hasValue(env, 'AGY_SESSION_OWNER');
   const sessionRelay = inspectSessionRelay(env, sessionConfigured);
+  const outboxConfigured = hasValue(env, 'AGY_OUTBOX_DIR') || hasValue(env, 'AGY_OUTBOX_OWNER');
+  const outboxRelay = inspectSessionRelay({ BUZZ_RELAY_URL: env.BUZZ_RELAY_URL }, outboxConfigured, 'delivery outbox');
   const stores = {
     outbox: await inspectStore(env, 'AGY_OUTBOX_DIR', 'AGY_OUTBOX_OWNER', 'Delivery outbox', fsImpl, platform),
     session: await inspectStore(env, 'AGY_SESSION_DIR', 'AGY_SESSION_OWNER', 'Session state', fsImpl, platform)
@@ -319,12 +339,17 @@ async function inspectState(env, fsImpl, platform, { processAliveImpl } = {}) {
   if (sessionRelay.status === 'fail') {
     stores.session = { ...stores.session, configured: true, status: 'fail', message: `${stores.session.message}; ${sessionRelay.message}` };
   }
+  if (outboxRelay.status === 'fail') {
+    stores.outbox = { ...stores.outbox, configured: true, status: 'fail', message: `${stores.outbox.message}; ${outboxRelay.message}` };
+  }
   for (const [name, key] of [['outbox', 'AGY_OUTBOX_DIR'], ['session', 'AGY_SESSION_DIR']]) {
     const store = stores[name];
     if (!store.configured || store.status === 'fail') continue;
     const summary = await inspectStateDirectory(env[key], {
       kind: name,
-      expectedOwner: name === 'outbox' ? env.AGY_OUTBOX_OWNER : null,
+      expectedOwner: name === 'outbox' ? env.AGY_OUTBOX_OWNER : env.AGY_SESSION_OWNER,
+      expectedRelayHash: canonicalRelay(env.BUZZ_RELAY_URL)
+        ? createHash('sha256').update(canonicalRelay(env.BUZZ_RELAY_URL)).digest('hex') : null,
       fsImpl,
       processAliveImpl
     });
@@ -334,7 +359,9 @@ async function inspectState(env, fsImpl, platform, { processAliveImpl } = {}) {
       store.statuses = summary.statuses;
     }
     store.scan = summary.scan;
-    if (stateSummaryStatus(summary) === 'warn' && store.status === 'pass') store.status = 'warn';
+    store.binding = summary.binding;
+    if (stateSummaryStatus(summary) === 'fail') store.status = 'fail';
+    else if (stateSummaryStatus(summary) === 'warn' && store.status === 'pass') store.status = 'warn';
   }
   const configuredStores = Object.values(stores).filter(({ configured }) => configured);
   const status = Object.values(stores).some(({ status: storeStatus }) => storeStatus === 'fail')
@@ -343,7 +370,7 @@ async function inspectState(env, fsImpl, platform, { processAliveImpl } = {}) {
   const message = configuredStores.length === 0
     ? 'Optional durable state is disabled'
     : Object.entries(stores).filter(([, store]) => store.configured).map(([name, store]) => `${name}: ${store.message}`).join('; ');
-  return { configured: configuredStores.length > 0, status, message, stores, sessionRelay };
+  return { configured: configuredStores.length > 0, status, message, stores, sessionRelay, outboxRelay };
 }
 
 export async function runDoctor({
@@ -384,10 +411,12 @@ export async function runDoctor({
     check('buzz-command', commands.buzz.status, commands.buzz.message),
     check('optional-state', state.status, state.message)];
   const relayConfigured = hasValue(diagnosticEnv, 'BUZZ_RELAY_URL') || hasValue(diagnosticEnv, 'AGY_RELAY_URL');
-  const relay = { configured: relayConfigured, status: state.sessionRelay.status, message: state.sessionRelay.status === 'fail'
-    ? state.sessionRelay.message
+  const relayFailure = [state.sessionRelay, state.outboxRelay].find(check => check.status === 'fail');
+  const relay = { configured: relayConfigured, status: relayFailure ? 'fail' : 'pass', message: relayFailure
+    ? relayFailure.message
     : relayConfigured ? 'Relay URL is configured; this does not enable persistence' : 'No relay URL is configured' };
-  checks.push(check('session-relay', relay.status, relay.message));
+  checks.push(check('session-relay', state.sessionRelay.status, state.sessionRelay.message));
+  checks.push(check('outbox-relay', state.outboxRelay.status, state.outboxRelay.message));
   const report = { doctorVersion: DOCTOR_VERSION, mode: checkCapabilities ? 'capabilities' : 'offline', platform, cwd, ok: false,
     node: nodeCheck, adapter: { configuredVersion: harnessInfo.report.adapter?.configuredVersion ?? null, runningVersion: null, runningStatus: 'unknown' },
     commands, state, relay, checks, harness: harnessInfo.report };
@@ -460,7 +489,8 @@ export function doctorUsage() {
 export async function runDoctorCli(argv = process.argv.slice(2), {
   env = process.env,
   stdout = process.stdout,
-  stderr = process.stderr
+  stderr = process.stderr,
+  runDoctorImpl = runDoctor
 } = {}) {
   try {
     const options = parseDoctorArgs(argv);
@@ -472,7 +502,7 @@ export async function runDoctorCli(argv = process.argv.slice(2), {
       stdout.write(`${DOCTOR_VERSION}\n`);
       return 0;
     }
-    const report = await runDoctor({ ...options, env });
+    const report = await runDoctorImpl({ ...options, env });
     stdout.write(options.json ? `${JSON.stringify(report)}\n` : formatDoctorReport(report));
     return report.ok ? 0 : 1;
   } catch (error) {

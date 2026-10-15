@@ -191,6 +191,15 @@ test('parses destination from structural prompt blocks', () => {
   assert.deepEqual(parseBuzzContext(livePrompt), { channelId, replyTo });
 });
 
+test('canonicalizes mixed-case channel and reply identities from trusted context', () => {
+  const upperReplyTo = replyTo.toUpperCase();
+  const prompt = [
+    { type: 'text', text: '[Base] Base platform context.' },
+    { type: 'text', text: `[Context]\nChannel: coordination (#${channelId.toUpperCase()})\nThread root: ${upperReplyTo}\n--reply-to ${replyTo}` }
+  ];
+  assert.deepEqual(parseBuzzContext(prompt), { channelId, replyTo });
+});
+
 // Measured live on 2026-09-03: the second turn of a Buzz session arrives as exactly three
 // blocks, with no [Base] block, because Buzz only sends the base and agent instructions once.
 const followUpTurnPrompt = [
@@ -625,7 +634,45 @@ test('returns deterministic errors for unsupported requests', async () => {
     await app.waitFor((m) => m.id === 2);
     app.send({ jsonrpc: '2.0', id: 3, method: 'session/prompt', params: { sessionId: 'missing', prompt: [] } });
     const missing = await app.waitFor((m) => m.id === 3);
-    assert.equal(missing.error.code, -32001);
+    assert.equal(missing.error.code, -32602);
+    assert.equal(missing.error.message, 'unknown session');
+  } finally {
+    await app.close();
+  }
+});
+
+test('unknown session IDs are invalid params and start no provider or publication work', async () => {
+  const calls = { sessionFactory: 0, providerPrompt: 0, modelChange: 0, steer: 0, publisherFactory: 0, publication: 0 };
+  const app = startMemoryServer({
+    sessionFactory: () => {
+      calls.sessionFactory += 1;
+      return {
+        prompt: async () => { calls.providerPrompt += 1; return 'unused'; },
+        setModel: () => { calls.modelChange += 1; },
+        steer: async () => { calls.steer += 1; return { outcome: 'injected' }; },
+        cancel() {}, close() {}
+      };
+    },
+    publisherFactory: () => {
+      calls.publisherFactory += 1;
+      return { publish: async () => { calls.publication += 1; return { status: 'sent' }; } };
+    }
+  });
+  try {
+    app.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: 1 } });
+    await app.waitFor((message) => message.id === 1);
+    const requests = [
+      [2, 'session/set_config_option', { sessionId: 'missing', configId: 'model', value: 'gemini-3.8-flash-high' }],
+      [3, '_session/steering', { sessionId: 'missing', prompt: [{ type: 'text', text: 'must not steer' }] }],
+      [4, 'session/prompt', { sessionId: 'missing', prompt: promptWithText('must not prompt') }]
+    ];
+    for (const [id, method, params] of requests) {
+      app.send({ jsonrpc: '2.0', id, method, params });
+      const response = await app.waitFor((message) => message.id === id);
+      assert.equal(response.error.code, -32602, method);
+      assert.equal(response.error.message, 'unknown session', method);
+    }
+    assert.deepEqual(calls, { sessionFactory: 0, providerPrompt: 0, modelChange: 0, steer: 0, publisherFactory: 0, publication: 0 });
   } finally {
     await app.close();
   }
@@ -797,9 +844,8 @@ test('ignores stale child events after cancellation and remains fail closed', as
 test('pins the agy print timeout far above the Buzz 7200s max-turn ceiling', () => {
   const match = /^(\d+)h$/.exec(PINNED_PRINT_TIMEOUT);
   assert.ok(match, `expected an hour-denominated pin, got ${PINNED_PRINT_TIMEOUT}`);
-  // agy's cap is a wall clock over the whole process, and AgySession reuses one
-  // child across turns. Equal to the Buzz ceiling is not enough: a process alive
-  // that long dies mid-turn without a result event.
+  // Keep margin for providers that apply the cap across a reused process.
+  // Current provider timeout semantics are characterized separately.
   assert.ok(Number(match[1]) * 3600 > 7200, `pin ${PINNED_PRINT_TIMEOUT} must exceed the 7200s Buzz max-turn wall`);
 });
 
@@ -813,9 +859,10 @@ test('reports the agy process age when the child exits before completing a promp
     child.kill = () => true;
     return child;
   };
-  const clock = [1_000, 7_204_000];
-  const session = new AgySession({ cwd: root, spawnFn, nowFn: () => clock.shift() });
+  let now = 1_000;
+  const session = new AgySession({ cwd: root, spawnFn, nowFn: () => now });
   const pending = session.prompt('long turn', () => {});
+  now = 7_204_000;
   child.emit('close');
   await assert.rejects(pending, (error) => {
     assert.equal(error.rpcMessage, 'agy exited before completing the prompt (process age 7203s)');
@@ -1034,7 +1081,8 @@ test('keeps a session turn active through provider work and fails closed after c
   await new Promise((resolve) => setImmediate(resolve));
   send({ jsonrpc: '2.0', id: 4, method: 'session/prompt', params: { sessionId: session.result.sessionId, prompt: promptWithText('second') } });
   const busy = await waitFor((message) => message.id === 4);
-  assert.equal(busy.error.code, -32002);
+  assert.equal(busy.error.code, -32003);
+  assert.equal(busy.error.message, 'session turn is busy');
   send({ jsonrpc: '2.0', method: 'session/cancel', params: { sessionId: session.result.sessionId } });
   const cancelled = await waitFor((message) => message.id === 3);
   assert.equal(cancelled.result.stopReason, 'cancelled');

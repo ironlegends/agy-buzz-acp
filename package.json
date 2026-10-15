@@ -1,6 +1,6 @@
 {
   "name": "agy-buzz-acp",
-  "version": "0.5.10",
+  "version": "0.6.0",
   "description": "Minimal ACP stdio adapter for the official Antigravity CLI.",
   "type": "module",
   "bin": {
@@ -8,7 +8,8 @@
     "agy-buzz-recover": "bin/agy-buzz-recover.js",
     "agy-buzz-doctor": "bin/agy-buzz-doctor.js",
     "agy-buzz-manage": "bin/agy-buzz-manage.js",
-    "agy-buzz-steer-hook": "bin/agy-buzz-steer-hook.js"
+    "agy-buzz-steer-hook": "bin/agy-buzz-steer-hook.js",
+    "agy-buzz-state": "bin/agy-buzz-state.js"
   },
   "files": [
     "bin/agy-buzz-acp.js",
@@ -26,6 +27,7 @@
     "src/delivery/identity.js",
     "src/doctor.js",
     "docs/COMPATIBILITY.md",
+    "docs/compatibility-manifest.json",
     "docs/PROTOCOL_LIMITS.md",
     "docs/DIAGNOSTICS.md",
     "docs/OFFICIAL_BUZZ_RECOVERY.md",
@@ -36,6 +38,11 @@
     "examples",
     "README.md",
     "src/session-state.js",
+    "src/session-state-store.js",
+    "src/session-state-migration.js",
+    "bin/agy-buzz-state.js",
+    "docs/STATE_MIGRATION.md",
+    "docs/AUDIT_HARDENING.md",
     "LICENSE",
     "CONTRIBUTING.md",
     "src/models.js",
@@ -52,7 +59,7 @@
     "check": "npm test && npm pack --dry-run"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "license": "MIT",
   "repository": {
@@ -63,7 +70,8 @@
     "url": "https://github.com/ironlegends/agy-buzz-acp/issues"
   },
   "dependencies": {
-    "fs-native-extensions": "1.5.1"
+    "fs-native-extensions": "1.5.1",
+    "bare-url": "2.5.5"
   },
   "bundledDependencies": [
     "fs-native-extensions",
@@ -71,6 +79,8 @@
     "bare-addon-resolve",
     "bare-module-resolve",
     "bare-semver",
-    "which-runtime"
+    "which-runtime",
+    "bare-url",
+    "bare-path"
   ]
 }

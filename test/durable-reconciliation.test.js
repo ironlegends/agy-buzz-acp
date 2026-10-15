@@ -39,7 +39,7 @@ async function durableHarness({ outboxFactory, publisherFactory, sessionFactory 
   // A real, enabled outbox: the fourth condition is the only one that survives a
   // restart, and a harness that disables it proves reconciliation in the one
   // configuration where that condition cannot refuse anything.
-  const outbox = new DeliveryOutbox({ dir: await mkdtemp(join(tmpdir(), 'agy-reconcile-outbox-')), owner });
+  const outbox = new DeliveryOutbox({ dir: await mkdtemp(join(tmpdir(), 'agy-reconcile-outbox-')), owner, relay });
   const scope = await state.scope({ channelId, cwd: dir, model: 'gemini-3.8-flash-high' });
   const output = new PassThrough();
   const diagnostics = new PassThrough();
@@ -136,7 +136,7 @@ async function steeringHarness({ durableState = true } = {}) {
   // is not held yet. Reconciliation of a bridge now requires this instance to take
   // that lock, which means the harness needs the real state and a real outbox.
   const state = new SessionState({ dir: await mkdtemp(join(tmpdir(), 'agy-steer-state-')), owner, relay });
-  const outbox = new DeliveryOutbox({ dir: await mkdtemp(join(tmpdir(), 'agy-steer-outbox-')), owner });
+  const outbox = new DeliveryOutbox({ dir: await mkdtemp(join(tmpdir(), 'agy-steer-outbox-')), owner, relay });
   const output = new PassThrough();
   const diagnostics = new PassThrough();
   const find = wireReader(output);
@@ -225,7 +225,7 @@ test('a bridge left blocked by a dead turn is archived and rebuilt on the next p
 test('server rebuilds an explicitly retired mock session (real watchdog covered separately)', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'agy-reconcile-steer-timeout-'));
   const state = new SessionState({ dir: await mkdtemp(join(tmpdir(), 'agy-steer-timeout-state-')), owner, relay });
-  const outbox = new DeliveryOutbox({ dir: await mkdtemp(join(tmpdir(), 'agy-steer-timeout-outbox-')), owner });
+  const outbox = new DeliveryOutbox({ dir: await mkdtemp(join(tmpdir(), 'agy-steer-timeout-outbox-')), owner, relay });
   const output = new PassThrough();
   const diagnostics = new PassThrough();
   const find = wireReader(output);

@@ -1,7 +1,9 @@
 import { access, lstat, open, readdir, readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
-import { readOutboxRecordFile } from './delivery/outbox.js';
+import { readOutboxRecordFile, OUTBOX_STORE_MARKER, validateOutboxStoreMarker } from './delivery/outbox.js';
 import { validateSessionRecord } from './session-state.js';
+import { SESSION_STATE_STORE_MARKER, validateSessionStateStoreMarker, readSessionStateFile,
+  canonicalChannelId, sessionStateChannelHash } from './session-state-store.js';
 
 export const MAX_STATE_ENTRIES = 1000;
 export const MAX_STATE_FILE_BYTES = 256 * 1024;
@@ -79,6 +81,7 @@ async function lockState(dir, name, { fsImpl, processAliveImpl }) {
 export async function inspectStateDirectory(dir, {
   kind = 'outbox',
   expectedOwner = null,
+  expectedRelayHash = null,
   fsImpl = { access, lstat, open, readdir, readFile, stat },
   processAliveImpl = (pid) => {
     try { process.kill(pid, 0); return true; } catch (error) {
@@ -122,6 +125,23 @@ export async function inspectStateDirectory(dir, {
     summary.scan.message = 'State contents could not be listed';
     return summary;
   }
+  const markerName = kind === 'session' ? SESSION_STATE_STORE_MARKER : OUTBOX_STORE_MARKER;
+  let marker = null;
+  summary.binding = { status: names.length ? 'legacy' : 'empty', message: names.length
+    ? 'Unmarked legacy store requires explicit migration or read-only inspection'
+    : 'Empty store has no persisted binding yet' };
+  if (names.includes(markerName)) {
+    try {
+      marker = JSON.parse((await readSessionStateFile(join(dir, markerName), 4096, { fsImpl })).text);
+      const binding = { ...(expectedOwner ? { owner: expectedOwner } : {}),
+        ...(expectedRelayHash ? { [kind === 'session' ? 'relayHash' : 'relayFingerprint']: expectedRelayHash } : {}) };
+      if (kind === 'session') validateSessionStateStoreMarker(marker, binding);
+      else if (!validateOutboxStoreMarker(marker, binding)) throw new Error('invalid binding');
+      summary.binding = { status: 'pass', message: 'Store format and configured binding match' };
+    } catch {
+      summary.binding = { status: 'fail', message: 'Store marker is unsafe, invalid or does not match the configured binding' };
+    }
+  }
   summary.entries.seen = names.length;
   const limit = Number.isInteger(maxEntries) && maxEntries > 0 ? maxEntries : MAX_STATE_ENTRIES;
   const fileLimit = Number.isInteger(maxFileBytes) && maxFileBytes > 0
@@ -158,11 +178,16 @@ export async function inspectStateDirectory(dir, {
       if (kind === 'session') {
         record = JSON.parse(await fsImpl.readFile(recordPath, 'utf8'));
         validateSessionRecord(record);
+        if (marker && (record.scope.owner !== marker.owner || record.scope.relay !== marker.relay ||
+            record.scope.channelId !== canonicalChannelId(record.scope.channelId) ||
+            name !== `${sessionStateChannelHash(record.scope.channelId)}.json`)) throw new Error('invalid canonical record');
       } else {
         record = await readOutboxRecordFile(recordPath, name.slice(0, -'.json'.length), {
           expectedOwner, fsImpl, maxBytes: fileLimit
         });
         if (!record) throw new Error('missing outbox record');
+        if (record.schemaVersion === 2 && (!marker || record.relayFingerprint !== marker.relayFingerprint)) throw new Error('invalid outbox binding');
+        if (marker && record.schemaVersion !== 2) throw new Error('legacy record in bound store');
       }
       addRecord(summary, kind, record);
     } catch {
@@ -175,6 +200,8 @@ export async function inspectStateDirectory(dir, {
 }
 
 export function stateSummaryStatus(summary) {
+  if (summary?.binding?.status === 'fail') return 'fail';
+  if (summary?.binding?.status === 'legacy') return 'warn';
   if (summary?.scan?.status !== 'pass') return 'warn';
   if ((summary?.records?.blocked ?? 0) > 0 || (summary?.records?.uncertain ?? 0) > 0 ||
       (summary?.records?.invalid ?? 0) > 0 || (summary?.locks?.stale ?? 0) > 0 ||

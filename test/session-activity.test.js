@@ -64,6 +64,44 @@ test('publishes only agent response deltas and bounded ACP activity', async () =
   assert.ok(activity.every((update) => !Object.hasOwn(update, 'parameters') && !Object.hasOwn(update, 'output')));
 });
 
+test('measures each provider turn from prompt delivery and prefers a valid provider duration', async () => {
+  const child = fakeChild();
+  const activity = [];
+  let now = 0;
+  const session = new AgySession({ nowFn: () => now, spawnFn: () => {
+    now = 2000;
+    return child;
+  } });
+  const durations = () => activity.filter((update) => update.toolName === 'agy_provider' && update.status === 'completed')
+    .map((update) => update.durationSeconds);
+
+  const first = session.prompt('first', () => {}, (update) => activity.push(update));
+  emit(child, { event: 'init', conversation_id: 'conversation-123' });
+  now = 3000;
+  emit(child, { event: 'result', result: {
+    conversation_id: 'conversation-123', status: 'SUCCESS', response: 'first answer'
+  } });
+  assert.equal(await first, 'first answer');
+
+  now = 60000;
+  const second = session.prompt('second', () => {}, (update) => activity.push(update));
+  now = 61000;
+  emit(child, { event: 'result', result: {
+    conversation_id: 'conversation-123', status: 'SUCCESS', response: 'second answer'
+  } });
+  assert.equal(await second, 'second answer');
+
+  now = 120000;
+  const third = session.prompt('third', () => {}, (update) => activity.push(update));
+  now = 125000;
+  emit(child, { event: 'result', result: {
+    conversation_id: 'conversation-123', status: 'SUCCESS', response: 'third answer', duration_seconds: 0.5
+  } });
+  assert.equal(await third, 'third answer');
+  assert.deepEqual(durations(), [1, 1, 0.5]);
+  session.close();
+});
+
 test('poisons and stops a child after invalid JSON so late output cannot complete a later prompt', async () => {
   const child = fakeChild();
   const session = new AgySession({ spawnFn: () => child });

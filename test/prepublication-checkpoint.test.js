@@ -13,7 +13,7 @@ const prompt=[{type:'text',text:`<context>\nChannel: synthetic (#${channelId})\n
 async function harness(t,{failStage=false, failRetire=false, failSave=false, failOutboxUpdate=false, initial=false}={}) {
   const dir=await mkdtemp(join(tmpdir(),'agy-prepublish-'));
   const state=new SessionState({dir:join(dir,'state'),owner,relay:'wss://probe.invalid'});
-  const outbox=new DeliveryOutbox({dir:join(dir,'outbox'),owner});
+  const outbox=new DeliveryOutbox({dir:join(dir,'outbox'),owner,relay:'wss://probe.invalid'});
   if(failOutboxUpdate) outbox.update=async()=>{throw new Error('synthetic outbox checkpoint failure');};
   const scope=await state.scope({channelId,cwd:dir,model:'gemini-3.8-flash-high'});
   if(initial) await state.save(scope,'confirmed-conversation');

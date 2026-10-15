@@ -6,7 +6,7 @@ This is a community adapter for Buzz. It is not a general-purpose ACP client ada
 
 ## Requirements
 
-- Node.js 20 or newer.
+- Node.js 22 or newer for this source candidate.
 - Buzz Desktop and the Buzz CLI, with a managed agent identity configured by Buzz.
 - Antigravity CLI installed and authenticated separately through its official flow.
 - A provider model available to your account. The default is `gemini-3.8-flash-high`; `AGY_MODEL` selects another model at adapter startup.
@@ -20,6 +20,7 @@ Upgrading from 0.4.x? Read the [0.4.x to 0.5.8 migration guide](docs/MIGRATING_0
 - **0.5.8 is the historical public release.** Its published source, archive and SHA-256 remain recorded in [compatibility and release checks](docs/COMPATIBILITY.md).
 - **0.5.9 was a draft superseded by 0.5.10.** Some installations already run 0.5.9; preserve its archive and exact checksum as rollback evidence, and never overwrite or delete them.
 - **0.5.10 is the current release line.** Use the published v0.5.10 release assets when available; draft assets are not releases. The live Buzz and installed Desktop evidence is recorded in [compatibility and release checks](docs/COMPATIBILITY.md).
+- **0.6.0 is an unreleased source candidate.** It groups the [audit fixes and durability work](docs/AUDIT_HARDENING.md). Existing state requires the explicit [canonical-store migration](docs/STATE_MIGRATION.md); outbox v2 binds the account and relay. No installed runtime is updated by this checkout.
 
 ## Install and register
 
@@ -37,7 +38,7 @@ Install a published archive only after checking its version and trusted SHA-256:
 npm install --global ./agy-buzz-acp-0.5.10.tgz
 ```
 
-The package provides `agy-buzz-acp`, `agy-buzz-recover`, `agy-buzz-doctor`, `agy-buzz-manage`, and `agy-buzz-steer-hook`. The native file-lock dependency and its bundled support packages are included in the release archive. No npm-registry publication is required to install the archive.
+The source candidate provides `agy-buzz-acp`, `agy-buzz-recover`, `agy-buzz-doctor`, `agy-buzz-manage`, `agy-buzz-steer-hook`, and `agy-buzz-state`. The native file-lock dependency and its bundled support packages are included in the archive. No npm-registry publication is required to install an archive.
 
 Generate the custom harness settings using your actual installation paths:
 
@@ -108,7 +109,7 @@ Delivery states:
 
 ## Conversation continuity
 
-Without durable state or steering, the adapter reuses its provider and rotates an aging provider process between completed turns, at 21 hours, leaving three hours before agy's 24-hour process limit (one hour of dispatch margin beyond a two-hour Buzz turn). It waits for the old child to close, starts `agy --conversation` with the confirmed identifier, and requires a matching `init` before sending the next prompt. Rotation does not interrupt an active turn or replay a previous prompt.
+Without durable state or steering, the adapter reuses its provider and rotates an aging provider process between completed turns at 21 hours. This conservative policy leaves three hours below the configured 24-hour print-timeout value. Provider timeout semantics have changed across observed versions, so this value is not a verified process lifetime guarantee. It waits for the old child to close, starts `agy --conversation` with the confirmed identifier, and requires a matching `init` before sending the next prompt. Rotation does not interrupt an active turn or replay a previous prompt.
 
 With durable state enabled, the provider instead retires after each successfully delivered and checkpointed turn, then restarts with the validated conversation for the next turn. This trades startup/resume latency for a confirmed provider-stop boundary.
 
@@ -129,17 +130,20 @@ To deliberately start a new conversation instead, configure a new empty private 
 Use a separate private state directory for each managed identity. Do not copy these records between machines. The same plaintext and Windows ACL limitations as the outbox apply.
 ## Retaining an undelivered answer
 
-Outbox persistence is disabled by default. Set both `AGY_OUTBOX_DIR` and `AGY_OUTBOX_OWNER` to enable it. A partial configuration is rejected.
+Outbox persistence is disabled by default. Set `AGY_OUTBOX_DIR` and `AGY_OUTBOX_OWNER`, with the actual `BUZZ_RELAY_URL`, to enable relay-bound version-2 storage. A partial configuration is rejected. Legacy records remain readable without assigning them to a new relay; see [outbox compatibility and retention](docs/OUTBOX_COMPATIBILITY.md).
 
 Records contain the final answer, destination, public owner, delivery state and timestamps. They do not contain prompts, provider credentials, private keys or environment dumps. These files are not encrypted. POSIX mode 0700/0600 is requested; on Windows, filesystem ACLs determine effective access. Provision a private directory for the account running Buzz and verify those ACLs before enabling storage. POSIX mode bits alone do not prove Windows privacy.
 
 ```sh
-agy-buzz-recover list
+agy-buzz-recover list --limit 100
 agy-buzz-recover show RECOVERY_ID
 agy-buzz-recover retry RECOVERY_ID
+agy-buzz-recover archive-sent --archive-dir /separate/private/archive
 ```
 
 The recovery command verifies the current public Buzz identity. `show` intentionally prints the retained answer. `retry` only accepts `failed-before-start` and claims the record before publishing. A legacy retry-lock directory remains blocked for operator reconciliation. A native lock file may remain after release; file presence alone does not establish that the lock is held. It never retries `sent`, `uncertain`, or an interrupted publication blindly.
+
+Listing is explicitly paginated. Pass the returned `nextCursor` as `--after` for the next page. Archival defaults to dry-run; `--apply` copies only acknowledged sent records with byte verification before removing their active copies. Stop affected writers before operator maintenance. Preserve unresolved legacy deliveries and verify their provenance manually; a fresh v2 directory never settles them automatically.
 
 If an enabled outbox cannot write, the active adapter can retain a `mem_*` recovery ID in memory. That ID disappears when the adapter exits and cannot be recovered by a separate CLI process.
 
@@ -153,7 +157,7 @@ If an enabled outbox cannot write, the active adapter can retain a `mem_*` recov
 - `session/cancel` interrupts provider/publication work without replaying the prompt.
 - Images, audio, embedded context and bridging `mcpServers` are not supported. Provider-local tools remain governed by the provider's own configuration.
 
-The adapter starts `agy` without a shell and always includes `--sandbox`. `--print-timeout 24h` is a process lifetime limit, not an idle timeout. Buzz's turn deadlines remain separate. No permission bypass flag is supported.
+The adapter starts `agy` without a shell and always includes `--sandbox`. It pins `--print-timeout 24h` conservatively; Buzz's turn deadlines remain separate. Current CLI help describes a turn wait. The dated [compatibility evidence](docs/COMPATIBILITY.md) distinguishes that description from measured behavior. No permission bypass flag is supported.
 
 ## Development and validation
 

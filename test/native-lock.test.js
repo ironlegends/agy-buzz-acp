@@ -162,7 +162,7 @@ test('session ownership retains a native lock file and releases it without unlin
 
 test('outbox retry uses the native lock and refuses a legacy claim directory', async () => {
   const dir = await tempDir('agy-native-outbox-');
-  const outbox = new DeliveryOutbox({ dir, owner: '1'.repeat(64), idFn: () => 'native-retry' });
+  const outbox = new DeliveryOutbox({ dir, owner: '1'.repeat(64), relay: 'wss://probe.invalid', idFn: () => 'native-retry' });
   try {
     const id = await outbox.begin({ channelId, replyTo: 'a'.repeat(64), content: 'final' });
     await outbox.update(id, { status: 'failed-before-start' });
@@ -180,7 +180,7 @@ test('outbox retry uses the native lock and refuses a legacy claim directory', a
 
 test('outbox retry remains blocked while another process holds the same native claim lock', async () => {
   const dir = await tempDir('agy-native-outbox-process-');
-  const outbox = new DeliveryOutbox({ dir, owner: '1'.repeat(64), idFn: () => 'process-retry' });
+  const outbox = new DeliveryOutbox({ dir, owner: '1'.repeat(64), relay: 'wss://probe.invalid', idFn: () => 'process-retry' });
   let holder;
   try {
     const id = await outbox.begin({ channelId, replyTo: 'a'.repeat(64), content: 'final' });

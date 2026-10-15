@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { resolve } from 'node:path';
 import { createLineDecoder, createByteBudget, FRAME_TOO_LARGE, FRAME_INVALID_UTF8, resolveFrameLimits } from './frame-codec.js';
 
 export const PINNED_MODEL = 'gemini-3.8-flash-high';
@@ -17,14 +18,11 @@ export const PROCESS_LIFETIME_MS = 24 * 60 * 60 * 1000;
 export const ROTATION_HEADROOM_MS = 3 * 60 * 60 * 1000;
 export const ROTATION_AT_MS = PROCESS_LIFETIME_MS - ROTATION_HEADROOM_MS;
 export const CONTEXT_LOST_MESSAGE = 'agy session context lost; resume unsupported';
-// agy print mode aborts at --print-timeout (default 5m0s) and exits without emitting
-// a terminal result event. That cap is a wall clock on the whole PROCESS, not a
-// per-turn idle timer: printmode.go logs `Print mode: starting` exactly once, at
-// spawn, and the observed abort landed 303.6s after that single line. AgySession
-// reuses one child across turns, so a value equal to Buzz's own 7200s max-turn
-// ceiling would kill a live turn on a process that had merely been alive that long.
-// Pinned far above any realistic adapter lifetime so a turn is bounded by Buzz
-// (idle 900s of silence, 7200s wall), never silently by the CLI.
+// Older provider observations showed a process-wide print timeout. Current CLI
+// help describes a turn wait, and an open-stdin idle probe survives a short cap.
+// Keep the conservative 24h pin and 21h between-turn rotation policy rather than
+// relying on one provider version's timeout implementation. Buzz deadlines remain
+// independent. Re-characterize normal/resume/cancel behavior before an upgrade.
 export const PINNED_PRINT_TIMEOUT = '24h';
 
 function validateModel(model) {
@@ -268,6 +266,10 @@ export class AgySession {
         pending.rotating = true;
         await this.rotateChild();
         pending.rotating = false;
+        if (this.closed || this.pending !== pending) {
+          this.resumeEligible = false;
+          return;
+        }
       }
       if (this.contextLost) throw wrapperError(CONTEXT_LOST_MESSAGE);
       const resuming = this.resumeEligible && !this.child;
@@ -447,7 +449,7 @@ ${pending.text ?? ''}`
       pending.initialUserInputExpected = true;
       pending.initialUserInputSeen = false;
       pending.started = true;
-      pending.startedAt = this.childStartedAt ?? this.nowFn();
+      pending.startedAt = this.nowFn();
       pending.onActivity({ sessionUpdate: 'tool_call', toolCallId: `agy-${this.activityNonce}-provider-${pending.turnId}`,
         title: 'Model generation', toolName: 'agy_provider', kind: 'other', status: 'in_progress', index: 0 });
     } catch {
@@ -528,9 +530,14 @@ ${pending.text ?? ''}`
     const providerEnv = { ...process.env };
     delete providerEnv.AGY_STEER_BRIDGE_DIR;
     delete providerEnv.AGY_STEER_BINDING;
+    delete providerEnv.AGY_STEER_WORKSPACE_ROOT;
     const bridgeEnv = this.steeringCoordinator?.bridgeEnv?.();
-    if (bridgeEnv && typeof bridgeEnv === 'object') Object.assign(providerEnv, bridgeEnv);
-    this.childSteeringEnabled = Boolean(bridgeEnv && typeof bridgeEnv === 'object');
+    const hasBridgeEnv = Boolean(bridgeEnv && typeof bridgeEnv === 'object' && !Array.isArray(bridgeEnv));
+    if (hasBridgeEnv) {
+      Object.assign(providerEnv, bridgeEnv);
+      providerEnv.AGY_STEER_WORKSPACE_ROOT = resolve(this.cwd);
+    }
+    this.childSteeringEnabled = hasBridgeEnv;
     const child = this.spawnFn(this.command, args, {
       shell: false,
       cwd: this.cwd,
@@ -610,10 +617,9 @@ ${pending.text ?? ''}`
       if (this.resumeTimer) clearTimeout(this.resumeTimer);
       this.resumeTimer = null;
       if (this.pending?.steeringFailure) return;
-      // Report how long this agy process had been alive. --print-timeout is a
-      // per-process wall clock, so an exit that lands on the pin is a different
-      // failure from a crash on the first turn, and the age is the only signal
-      // that tells them apart from outside the CLI's own log files.
+      // Report process age to distinguish early startup failures from an exit
+      // near the conservative timeout/rotation policy, without assuming the
+      // provider applies its print timeout identically across versions.
       if (this.pending && !this.pending.rotating && this.hasUnsettledSteering(this.pending)) {
         void this.failSteeringPending(this.pending, steeringError('agy provider exited before steering consumption'));
       } else if (this.pending && !this.pending.rotating) {
@@ -646,8 +652,7 @@ ${pending.text ?? ''}`
     }
   }
 
-  // Returns false when processing must stop for this chunk (the pending turn was
-  // just failed or finished), true to continue with the next buffered line.
+  // Returns false when this line invalidates the stream or turn, true to continue.
   processProviderLine(line, sourceChild) {
     if (!line.trim()) return true;
     let event;
@@ -693,7 +698,7 @@ ${pending.text ?? ''}`
       this.handleUserInput(step);
       return true;
     }
-    if (!this.validateEventConversation(event, sourceChild)) return false;
+    if (!this.validateEventConversation(event)) return false;
     if (event.event === 'init') {
       if (this.pending?.providerInitSeen) {
         this.failProviderEvent(steeringError('agy provider repeated init during active prompt'));
@@ -937,16 +942,18 @@ ${pending.text ?? ''}`
       this.finishPending(wrapperError('agy returned an unsuccessful result'));
       return;
     }
+    let response = typeof result.response === 'string' ? result.response : pending.emittedText;
     if (pending.injectedCount > 0) {
-      const response = pending.segments[pending.segmentIndex];
+      response = pending.segments[pending.segmentIndex];
       if (typeof response !== 'string' || response.length === 0) {
         void this.failSteeringPending(pending, steeringError('agy steering final response segment is missing'));
         return;
       }
-      this.finishPending(null, response, result.duration_seconds);
+    }
+    if (Buffer.byteLength(response, 'utf8') > this.maxResponseBytes) {
+      this.failProviderEvent(wrapperError('agy provider response exceeded the size limit'));
       return;
     }
-    const response = typeof result.response === 'string' ? result.response : pending.emittedText;
     this.finishPending(null, response, result.duration_seconds);
   }
 
@@ -1012,7 +1019,7 @@ ${pending.text ?? ''}`
     this.finishPending(finalFailure);
   }
 
-  validateEventConversation(event, sourceChild) {
+  validateEventConversation(event) {
     if (event.event === 'init') {
       const id = event.conversation_id;
       if (!validConversationId(id)) {
