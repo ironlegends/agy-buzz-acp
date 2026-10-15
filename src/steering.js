@@ -19,6 +19,33 @@ export const STEERING_LOCK_WAIT_MS = 2_000;
 // Keep auxiliary checks bounded without reusing the shorter steering lock wait.
 export const STEERING_WINDOWS_SUBPROCESS_TIMEOUT_MS = 10_000;
 
+const WINDOWS_ACL_PHASES = new Set([
+  'script-enter', 'acl-read-start', 'acl-read-end', 'rules-read-start', 'rules-read-end', 'json-start', 'json-end'
+]);
+
+function windowsAclPhase(stderr) {
+  let phase = 'unknown';
+  for (const line of String(stderr ?? '').split(/\r?\n/)) {
+    const match = line.trim().match(/^AGY_STEERING_ACL_PHASE=(.+)$/);
+    if (match && WINDOWS_ACL_PHASES.has(match[1])) phase = match[1];
+  }
+  return phase;
+}
+
+function windowsAclCategory(error) {
+  if (error instanceof SyntaxError) return 'invalid-output';
+  if (error?.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') return 'output-limit';
+  if (error?.code === 'ETIMEDOUT') return 'timeout';
+  if (error?.killed === true || (typeof error?.signal === 'string' && error.signal.length > 0)) return 'terminated';
+  if (error?.code === 'ENOENT') return 'unavailable';
+  return 'process-failed';
+}
+
+// Exported so tests can verify that child diagnostics never cross the RPC boundary.
+export function formatWindowsAclFailureMessage(error, stderr = error?.stderr) {
+  return `agy steering Windows ACL inspection failed (category: ${windowsAclCategory(error)}, phase: ${windowsAclPhase(stderr)})`;
+}
+
 export function readBooleanFlag(value) {
   return value === true || value === '1' || value === 'true';
 }
@@ -143,27 +170,38 @@ async function windowsOwnerSid() {
 
 async function readWindowsAccessRules(dir) {
   const script = [
+    "$ErrorActionPreference = 'Stop'",
+    "[Console]::Error.WriteLine('AGY_STEERING_ACL_PHASE=script-enter')",
+    "[Console]::Error.WriteLine('AGY_STEERING_ACL_PHASE=acl-read-start')",
     '$acl = [System.IO.DirectoryInfo]::new($env:AGY_STEER_ACL_PATH).GetAccessControl()',
-    '$entries = @($acl.Access | ForEach-Object {',
+    "[Console]::Error.WriteLine('AGY_STEERING_ACL_PHASE=acl-read-end')",
+    "[Console]::Error.WriteLine('AGY_STEERING_ACL_PHASE=rules-read-start')",
+    '$rules = $acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])',
+    "[Console]::Error.WriteLine('AGY_STEERING_ACL_PHASE=rules-read-end')",
+    '$entries = @($rules | ForEach-Object {',
     '  $sid = $_.IdentityReference.Value',
-    '  try { $sid = $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value } catch {}',
     '  [pscustomobject]@{ sid = $sid; type = $_.AccessControlType.ToString(); inherited = [bool]$_.IsInherited; rights = $_.FileSystemRights.ToString() }',
     '})',
-    '[pscustomobject]@{ entries = $entries } | ConvertTo-Json -Compress -Depth 5'
+    "[Console]::Error.WriteLine('AGY_STEERING_ACL_PHASE=json-start')",
+    '[pscustomobject]@{ entries = $entries } | ConvertTo-Json -Compress -Depth 5',
+    "[Console]::Error.WriteLine('AGY_STEERING_ACL_PHASE=json-end')"
   ].join(';');
+  let stderr;
   try {
     const systemRoot = process.env.SystemRoot ?? 'C:\\Windows';
     const powershell = join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
-    const { stdout } = await runBoundedSubprocess(powershell, [
+    const result = await runBoundedSubprocess(powershell, [
       '-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script
     ], {
       env: { ...process.env, AGY_STEER_ACL_PATH: dir },
       maxBuffer: 64 * 1024
     });
+    stderr = result.stderr;
+    const { stdout } = result;
     const parsed = JSON.parse(stdout);
     return Array.isArray(parsed.entries) ? parsed.entries : parsed.entries ? [parsed.entries] : [];
   } catch (error) {
-    throw steeringError('agy steering Windows ACL could not be inspected', 'AGY_STEER_PATH', error);
+    throw steeringError(formatWindowsAclFailureMessage(error, stderr ?? error?.stderr), 'AGY_STEER_PATH', error);
   }
 }
 
