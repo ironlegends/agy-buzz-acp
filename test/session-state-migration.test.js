@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { watch } from 'node:fs';
-import { link, lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { link, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { acquireNativeLock } from '../src/native-lock.js';
@@ -34,7 +34,7 @@ async function addLegacyRecord(sourceDir, channelId, { status = 'ready', convers
     schemaVersion: 1,
     sessionScope: 'channel',
     status,
-    scope: { owner, relay: state.relay, cwd: sourceDir, model: 'gemini-3.8-flash-high', channelId },
+    scope: { owner, relay: state.relay, cwd: await realpath(sourceDir), model: 'gemini-3.8-flash-high', channelId },
     conversationId: status === 'blocked' ? null : conversationId,
     updatedAt: '2026-10-15T12:00:00.000Z'
   };
@@ -80,6 +80,7 @@ test('dry-run and apply preserve the legacy source while canonicalizing records 
   const state = new SessionState({ dir: destinationDir, owner, relay });
   try {
     const scope = await state.scope({ channelId: lowerChannel, cwd: sourceDir, model: 'gemini-3.8-flash-high' });
+    assert.equal(migratedReady.scope.cwd, scope.cwd, 'the legacy fixture must store the writer canonical cwd');
     assert.equal((await state.load(scope)).conversationId, 'conversation-1');
     const blockedScope = await state.scope({ channelId: '223e4567-e89b-12d3-a456-426614174000', cwd: sourceDir, model: 'gemini-3.8-flash-high' });
     await assert.rejects(state.load(blockedScope), /blocked after an incomplete turn/);
