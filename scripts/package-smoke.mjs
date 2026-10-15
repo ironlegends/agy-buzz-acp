@@ -100,6 +100,10 @@ async function main() {
     assert.equal(recovery.status, 2, 'recovery usage smoke should fail closed with status 2');
     assert.match(recovery.stderr, /Usage: agy-buzz-recover/);
 
+    const stateMigration = runNode(packageRoot, 'bin/agy-buzz-state.js', ['--help']);
+    assert.equal(stateMigration.status, 0, 'packaged state migration command failed');
+    assert.match(stateMigration.stdout, /Usage: agy-buzz-state/);
+
     const setup = runNode(packageRoot, 'bin/agy-buzz-acp.js', ['setup'], '', {
       AGY_COMMAND: process.execPath, BUZZ_CLI_COMMAND: process.execPath
     });
@@ -142,7 +146,7 @@ async function main() {
     assert.equal(await readFile(harnessFile, 'utf8'), harnessBytes, 'rollback did not restore the original configuration');
     console.log(JSON.stringify({ package: packageJson.name, version: packageJson.version,
       archive: 'extracted', handshake: 'PASS', doctor: 'PASS', recovery: 'PASS', setup: 'PASS', models: 'PASS', manage: 'PASS',
-      nativeLock: 'PASS', providerCalls: 0, publications: 0 }));
+      nativeLock: 'PASS', stateMigration: 'PASS', providerCalls: 0, publications: 0 }));
   } finally {
     await rm(tempRoot, { recursive: true, force: true });
     await rm(packDestination, { recursive: true, force: true });
