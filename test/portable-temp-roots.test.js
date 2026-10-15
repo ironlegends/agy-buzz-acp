@@ -170,7 +170,7 @@ test('canonicalizes only default OS temp roots in state, coordinator, and ACP ru
     assert.equal(actual.defaultRoots.stateLockDirExists, true,
       'state initialization did not create the lock directory under the canonical temp root');
     assert.equal(typeof actual.reportedStateLockRoot, 'string');
-    assert.equal(actual.reportedStateLockRoot, actual.defaultRoots.stateLockDir);
+    assert.equal(await realpath(actual.reportedStateLockRoot), await realpath(actual.defaultRoots.stateLockDir));
     assert.equal(actual.directSteering.ok, true, `default coordinator failed: ${JSON.stringify(actual.directSteering)}`);
     assert.equal(actual.directSteering.value.enabled, true);
     assert.equal(actual.defaultRoots.steeringRootExists, true);
