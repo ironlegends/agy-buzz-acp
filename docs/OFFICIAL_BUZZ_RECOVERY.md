@@ -30,6 +30,8 @@ Steering is disabled unless all of the following are true:
 
 `AGY_STEER_ROOT_DIR` may point to a trusted private local directory. The adapter creates channel-scoped bridge state below that root and validates its Windows ACLs. `AGY_STEER_BRIDGE_DIR` and `AGY_STEER_BINDING` are generated and passed to the hook by the adapter; do not set or edit them manually.
 
+`AGY_STEER_WORKSPACE_ROOT` is generated from the resolved provider cwd by `AgySession` only when a coordinator bridge is active; never set it manually. For nonempty provider `workspacePaths`, the hook accepts only one bounded absolute path resolving to this generated root. Missing or empty `workspacePaths` retain the legacy behavior.
+
 The package installs the hook entry point with the other commands. A reviewed agy plugin must call it through a `PostInvocation` command, for example:
 
 ```json

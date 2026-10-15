@@ -179,6 +179,59 @@ test('the helper claims one FIFO request and injects only a user message', async
   assert.deepEqual(await runHook(api, providerInput(), coordinator.bridgeEnv()), {});
 });
 
+test('claims and injects when one absolute workspace matches the generated provider root', async (t) => {
+  const { api, coordinator, rootDir } = await createHarness(t);
+  const queued = await coordinator.enqueue('Correction A', { claimFloorStep: 41 });
+  const workspacePath = process.platform === 'win32' ? rootDir.toUpperCase() : rootDir;
+  const result = await runHook(api, providerInput({ invocationNum: 7, workspacePaths: [workspacePath] }), {
+    ...coordinator.bridgeEnv(), AGY_STEER_WORKSPACE_ROOT: rootDir
+  });
+
+  assert.deepEqual(result, {
+    injectSteps: [{ userMessage: 'Correction A' }],
+    terminationBehavior: 'force_continue'
+  });
+  const state = await coordinator.snapshot();
+  assert.equal(state.status, 'claimed');
+  assert.equal(state.activeSteerId, queued.steerId);
+  const request = JSON.parse(await readFile(coordinator.paths.request(queued.steerId), 'utf8'));
+  const ack = JSON.parse(await readFile(coordinator.paths.ack(queued.steerId), 'utf8'));
+  assert.equal(request.status, 'awaiting_user_input');
+  assert.equal(request.invocationNum, 7);
+  assert.equal(ack.status, 'injected');
+  assert.equal(ack.invocationNum, 7);
+});
+
+test('rejects nonempty workspace scope unless it matches one generated absolute root', async (t) => {
+  const { api, coordinator, rootDir } = await createHarness(t);
+  const queued = await coordinator.enqueue('Correction A', { claimFloorStep: 41 });
+  const expectedRoot = join(rootDir, 'provider-workspace');
+  const baseEnv = { ...coordinator.bridgeEnv(), AGY_STEER_WORKSPACE_ROOT: expectedRoot };
+  const invalid = [
+    [providerInput({ workspacePaths: [join(rootDir, 'foreign-workspace')] }), baseEnv],
+    [providerInput({ workspacePaths: [expectedRoot, expectedRoot] }), baseEnv],
+    [providerInput({ workspacePaths: ['relative/workspace'] }), baseEnv],
+    [providerInput({ workspacePaths: [null] }), baseEnv],
+    [providerInput({ workspacePaths: 'malformed' }), baseEnv],
+    [providerInput({ workspacePaths: [join(rootDir, 'x'.repeat(32_768))] }), baseEnv],
+    [providerInput({ workspacePaths: [expectedRoot] }), coordinator.bridgeEnv()],
+    [providerInput({ workspacePaths: [expectedRoot] }), {
+      ...coordinator.bridgeEnv(), AGY_STEER_WORKSPACE_ROOT: 'relative/root'
+    }]
+  ];
+  if (process.platform !== 'win32') {
+    const caseVariant = rootDir.replace(/[a-z]/, (letter) => letter.toUpperCase());
+    if (caseVariant !== rootDir) invalid.push([
+      providerInput({ workspacePaths: [caseVariant] }), { ...coordinator.bridgeEnv(), AGY_STEER_WORKSPACE_ROOT: rootDir }
+    ]);
+  }
+
+  for (const [input, env] of invalid) assert.deepEqual(await runHook(api, input, env), {});
+  assert.equal((await coordinator.snapshot()).status, 'queued');
+  assert.equal((await coordinator.snapshot()).queue[0].steerId, queued.steerId);
+  await assert.rejects(readFile(coordinator.paths.ack(queued.steerId)), { code: 'ENOENT' });
+});
+
 test('reads an atomic snapshot while the native lock is held, then the real helper injects', { timeout: 30_000 }, async (t) => {
   const { api, coordinator } = await createHarness(t);
   const queued = await coordinator.enqueue('Correction A', { claimFloorStep: 41 });

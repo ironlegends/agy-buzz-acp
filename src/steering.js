@@ -12,6 +12,7 @@ let windowsOwnerSidPromise;
 
 export const STEERING_SCHEMA_VERSION = 1;
 export const MAX_STEERING_TEXT_LENGTH = 16_384;
+const MAX_WORKSPACE_PATH_LENGTH = 32_767;
 export const MAX_PENDING_STEERS = 8;
 export const STEERING_LOCK_WAIT_MS = 2_000;
 // Cold PowerShell startup can exceed two seconds on loaded Windows hosts.
@@ -291,7 +292,7 @@ function assertToken(value, expected) {
   }
 }
 
-function validateProviderInput(input, expectedConversationId) {
+function validateProviderInput(input, expectedConversationId, expectedWorkspaceRoot) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) {
     throw steeringError('agy steering provider metadata is invalid', 'AGY_STEER_PROVIDER');
   }
@@ -301,8 +302,29 @@ function validateProviderInput(input, expectedConversationId) {
   if (!Number.isInteger(input.invocationNum) || input.invocationNum < 0 || input.invocationNum > 1_000_000) {
     throw steeringError('agy steering provider invocation metadata is invalid', 'AGY_STEER_PROVIDER');
   }
-  if (input.workspacePaths !== undefined && (!Array.isArray(input.workspacePaths) || input.workspacePaths.length !== 0)) {
-    throw steeringError('agy steering provider workspace scope is invalid', 'AGY_STEER_BINDING_MISMATCH');
+  if (input.workspacePaths !== undefined) {
+    if (!Array.isArray(input.workspacePaths)) {
+      throw steeringError('agy steering provider workspace scope is invalid', 'AGY_STEER_BINDING_MISMATCH');
+    }
+    if (input.workspacePaths.length > 0) {
+      if (input.workspacePaths.length !== 1) {
+        throw steeringError('agy steering provider workspace scope is invalid', 'AGY_STEER_BINDING_MISMATCH');
+      }
+      const [workspacePath] = input.workspacePaths;
+      if (typeof workspacePath !== 'string' || workspacePath.length === 0 ||
+          workspacePath.length > MAX_WORKSPACE_PATH_LENGTH || workspacePath.includes('\0') ||
+          typeof expectedWorkspaceRoot !== 'string' || expectedWorkspaceRoot.length === 0 ||
+          expectedWorkspaceRoot.length > MAX_WORKSPACE_PATH_LENGTH || expectedWorkspaceRoot.includes('\0') ||
+          !isAbsolute(workspacePath) || !isAbsolute(expectedWorkspaceRoot)) {
+        throw steeringError('agy steering provider workspace scope is invalid', 'AGY_STEER_BINDING_MISMATCH');
+      }
+      const workspaceRootMatches = process.platform === 'win32'
+        ? resolve(workspacePath).toLowerCase() === resolve(expectedWorkspaceRoot).toLowerCase()
+        : resolve(workspacePath) === resolve(expectedWorkspaceRoot);
+      if (!workspaceRootMatches) {
+        throw steeringError('agy steering provider workspace scope is invalid', 'AGY_STEER_BINDING_MISMATCH');
+      }
+    }
   }
   return { conversationId: input.conversationId, invocationNum: input.invocationNum };
 }
@@ -402,14 +424,14 @@ async function blockState(bridgeDir, state, reason) {
   return blocked;
 }
 
-export async function claimPendingSteer({ bridgeDir, bindingToken: expectedToken, input }) {
+export async function claimPendingSteer({ bridgeDir, bindingToken: expectedToken, expectedWorkspaceRoot, input }) {
   const path = normalizeBridgePath(bridgeDir);
   const preflight = await loadBinding(path);
   assertToken(expectedToken, preflight.token);
   return withBridgeLock(path, async () => {
     const { binding, token } = await loadBinding(path);
     assertToken(expectedToken, token);
-    const metadata = validateProviderInput(input, binding.conversationId);
+    const metadata = validateProviderInput(input, binding.conversationId, expectedWorkspaceRoot);
     const state = validateState(await readJson(join(path, 'state.json')), binding);
     if (state.status === 'blocked' || !state.guardBlocked && state.queue.length === 0) return {};
     if (state.activeSteerId || state.queue.some((entry) => entry.status === 'awaiting_user_input')) return {};
@@ -463,7 +485,12 @@ export async function runSteeringHook({ input, env = process.env } = {}) {
     const bridgeDir = env?.AGY_STEER_BRIDGE_DIR;
     const expectedToken = env?.AGY_STEER_BINDING;
     if (typeof bridgeDir !== 'string' || typeof expectedToken !== 'string') return {};
-    return await claimPendingSteer({ bridgeDir, bindingToken: expectedToken, input });
+    return await claimPendingSteer({
+      bridgeDir,
+      bindingToken: expectedToken,
+      expectedWorkspaceRoot: env?.AGY_STEER_WORKSPACE_ROOT,
+      input
+    });
   } catch {
     return {};
   }

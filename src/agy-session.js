@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { resolve } from 'node:path';
 import { createLineDecoder, createByteBudget, FRAME_TOO_LARGE, FRAME_INVALID_UTF8, resolveFrameLimits } from './frame-codec.js';
 
 export const PINNED_MODEL = 'gemini-3.8-flash-high';
@@ -529,9 +530,14 @@ ${pending.text ?? ''}`
     const providerEnv = { ...process.env };
     delete providerEnv.AGY_STEER_BRIDGE_DIR;
     delete providerEnv.AGY_STEER_BINDING;
+    delete providerEnv.AGY_STEER_WORKSPACE_ROOT;
     const bridgeEnv = this.steeringCoordinator?.bridgeEnv?.();
-    if (bridgeEnv && typeof bridgeEnv === 'object') Object.assign(providerEnv, bridgeEnv);
-    this.childSteeringEnabled = Boolean(bridgeEnv && typeof bridgeEnv === 'object');
+    const hasBridgeEnv = Boolean(bridgeEnv && typeof bridgeEnv === 'object' && !Array.isArray(bridgeEnv));
+    if (hasBridgeEnv) {
+      Object.assign(providerEnv, bridgeEnv);
+      providerEnv.AGY_STEER_WORKSPACE_ROOT = resolve(this.cwd);
+    }
+    this.childSteeringEnabled = hasBridgeEnv;
     const child = this.spawnFn(this.command, args, {
       shell: false,
       cwd: this.cwd,
