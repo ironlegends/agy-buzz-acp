@@ -50,7 +50,7 @@ Use an absolute `node` and adapter path in a real installation. Install the matc
 
 ### Activation procedure
 
-Both activation and rollback require an inactive boundary and a saved local checkpoint. Never modify configuration while a turn is running or while a steering claim is in-flight.
+Both activation and rollback require an inactive boundary and a saved local checkpoint. Never modify configuration while a turn is running or while a steering claim is in-flight. After refreshing the harness catalog, verify the deployed instance's effective arguments as described in [upgrades and rollback](UPGRADING.md); a retained instance override can still select the old adapter.
 
 1. **Stop the affected agent**: In Buzz Desktop, stop the specific agent and verify that its adapter and provider processes are completely retired. Confirm that no active steering claim is pending.
 2. **Save a checkpoint**: Preserve a backup of the existing harness file and active session state for recovery.

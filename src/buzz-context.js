@@ -53,6 +53,9 @@ export function parseBuzzContext(prompt) {
     .replace(/<\/context>\s*$/, '');
   const channelMatches = [...contextText.matchAll(new RegExp('^Channel:\\s*[^\\r\\n]*\\(#?(' + UUID + ')\\)\\s*$', 'gmi'))];
   if (channelMatches.length !== 1) return null;
+  const scopeMatches = [...contextText.matchAll(/^Scope:\s*([^\r\n]+)\s*$/gmi)];
+  if (scopeMatches.length > 1) return null;
+  const scope = scopeMatches[0]?.[1].trim().toLowerCase() ?? null;
   const rootMatches = [...contextText.matchAll(new RegExp('^Thread root:\\s*(' + EVENT_ID + ')\\s*$', 'gmi'))];
   const replyToMatches = [...contextText.matchAll(new RegExp('--reply-to\\s+(' + EVENT_ID + ')', 'gmi'))];
   const uniqueReplyTos = [...new Set(replyToMatches.map((m) => m[1].toLowerCase()))];
@@ -60,7 +63,12 @@ export function parseBuzzContext(prompt) {
   let replyTo;
   if (rootMatches.length === 1) {
     replyTo = canonicalRoot;
-    if (uniqueReplyTos.length > 0 && (uniqueReplyTos.length > 1 || uniqueReplyTos[0] !== replyTo)) return null;
+    if (uniqueReplyTos.length > 1) return null;
+    if (uniqueReplyTos.length === 1 && uniqueReplyTos[0] !== replyTo) {
+      const eventReplyTo = eventDestination(prompt, channelMatches[0][1]);
+      if (scope !== 'dm' || replyToMatches.length !== 1 || eventReplyTo !== uniqueReplyTos[0]) return null;
+      replyTo = uniqueReplyTos[0];
+    }
   } else if (rootMatches.length === 0) {
     if (uniqueReplyTos.length > 1) return null;
     replyTo = uniqueReplyTos[0] ?? eventDestination(prompt, channelMatches[0][1]);

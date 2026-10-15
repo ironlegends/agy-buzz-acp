@@ -35,6 +35,8 @@ The release is extracted into `root\versions\agy-buzz-acp-<version>`. The origin
 
 **Steering hook is a separate configuration:** the manager changes only harness `args[0]`, not the hook command. After installation, update an enabled dedicated hook to the same versioned runtime; preserve its old configuration. Reload Settings → Agents → Check again and restart the affected agent. Verify the version announced at initialization and a delivered/checkpointed test turn.
 
+**Check the deployed instance's arguments:** Buzz may retain per-instance runtime arguments that take precedence over the refreshed harness. In an observed Desktop 0.5.26 activation, the new harness environment loaded while the instance still launched the previous adapter path. Refreshing the catalog alone did not replace that override. At the inactive boundary, clear the instance's argument override through its supported configuration editor, or select a distinct custom harness ID in the linked agent editor and save its model selection. Verify the effective process arguments and initialized adapter version before sending test work. Preserve the previous harness ID and instance configuration for rollback. A changed label or a `Ready` runtime card does not establish which adapter is running.
+
 To roll back, stop the affected agent again, restore the matching previous hook configuration as well as the harness (or keep steering disabled for an older runtime without it), and preserve new-version state separately. The manager does not migrate state backward or undo external effects. Ensure the previous adapter entrypoint recorded in the backup still exists, then inspect the rollback plan:
 
 ```text
