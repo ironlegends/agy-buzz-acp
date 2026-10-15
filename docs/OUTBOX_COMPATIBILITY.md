@@ -13,6 +13,8 @@ Version-1 records contain the recovery identity, account owner, channel,
 destination reply, content, delivery status and timestamps. They carry no relay
 association. The channel and destination fields do not prove which relay
 accepted an event.
+The stored `channelId` and `replyTo` identify the delivery target, while
+`eventId` is the acknowledgement represented by a sent record.
 
 Version-1 records remain readable by the direct
 `DeliveryOutbox({ dir, owner })` constructor and by a configured
@@ -21,6 +23,16 @@ require `AGY_OUTBOX_DIR`, `AGY_OUTBOX_OWNER` and
 `BUZZ_RELAY_URL`. A configured outbox may inspect an unmarked
 version-1 store, but it cannot write to it or retry its records. No operation
 silently promotes a version-1 record or assigns it to the current relay.
+
+## Migration and rollback
+
+There is no automatic v1-to-v2 migration: v1 lacks independently verified relay
+provenance. Preserve its original directory, inspect unresolved deliveries, and
+reconcile their actual outcome before enabling a separate v2 directory. Choosing
+a new directory never settles or reassigns old deliveries. Never copy inflight
+or uncertain records into a new relay scope. For rollback, stop all affected
+writers, restore the previous runtime and matching configuration, and preserve
+the new directory separately. Older adapters must never write to a v2 store.
 
 ## Version 2 stores
 
@@ -85,3 +97,8 @@ the archive copy has been verified.
 
 Archiving is an explicit operator action. There is no automatic retention
 timer.
+Stop affected adapter writers before operator archival or retry maintenance.
+This avoids treating paginated listings as a transactionally stable snapshot
+while another process changes delivery status. The complete runtime scan is
+serialized by normal channel ownership; it is not a filesystem snapshot against
+arbitrary external mutation.
