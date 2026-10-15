@@ -8,7 +8,8 @@
     "agy-buzz-recover": "bin/agy-buzz-recover.js",
     "agy-buzz-doctor": "bin/agy-buzz-doctor.js",
     "agy-buzz-manage": "bin/agy-buzz-manage.js",
-    "agy-buzz-steer-hook": "bin/agy-buzz-steer-hook.js"
+    "agy-buzz-steer-hook": "bin/agy-buzz-steer-hook.js",
+    "agy-buzz-state": "bin/agy-buzz-state.js"
   },
   "files": [
     "bin/agy-buzz-acp.js",
@@ -37,6 +38,11 @@
     "examples",
     "README.md",
     "src/session-state.js",
+    "src/session-state-store.js",
+    "src/session-state-migration.js",
+    "bin/agy-buzz-state.js",
+    "docs/STATE_MIGRATION.md",
+    "docs/AUDIT_HARDENING.md",
     "LICENSE",
     "CONTRIBUTING.md",
     "src/models.js",

@@ -6,7 +6,7 @@ This is a community adapter for Buzz. It is not a general-purpose ACP client ada
 
 ## Requirements
 
-- Node.js 20 or newer.
+- Node.js 22 or newer for this source candidate.
 - Buzz Desktop and the Buzz CLI, with a managed agent identity configured by Buzz.
 - Antigravity CLI installed and authenticated separately through its official flow.
 - A provider model available to your account. The default is `gemini-3.8-flash-high`; `AGY_MODEL` selects another model at adapter startup.
@@ -20,6 +20,7 @@ Upgrading from 0.4.x? Read the [0.4.x to 0.5.8 migration guide](docs/MIGRATING_0
 - **0.5.8 is the historical public release.** Its published source, archive and SHA-256 remain recorded in [compatibility and release checks](docs/COMPATIBILITY.md).
 - **0.5.9 was a draft superseded by 0.5.10.** Some installations already run 0.5.9; preserve its archive and exact checksum as rollback evidence, and never overwrite or delete them.
 - **0.5.10 is the current release line.** Use the published v0.5.10 release assets when available; draft assets are not releases. The live Buzz and installed Desktop evidence is recorded in [compatibility and release checks](docs/COMPATIBILITY.md).
+- **0.6.0 is an unreleased source candidate.** It groups the [audit fixes and durability work](docs/AUDIT_HARDENING.md). Existing state requires the explicit [canonical-store migration](docs/STATE_MIGRATION.md); outbox v2 binds the account and relay. No installed runtime is updated by this checkout.
 
 ## Install and register
 
@@ -37,7 +38,7 @@ Install a published archive only after checking its version and trusted SHA-256:
 npm install --global ./agy-buzz-acp-0.5.10.tgz
 ```
 
-The package provides `agy-buzz-acp`, `agy-buzz-recover`, `agy-buzz-doctor`, `agy-buzz-manage`, and `agy-buzz-steer-hook`. The native file-lock dependency and its bundled support packages are included in the release archive. No npm-registry publication is required to install the archive.
+The source candidate provides `agy-buzz-acp`, `agy-buzz-recover`, `agy-buzz-doctor`, `agy-buzz-manage`, `agy-buzz-steer-hook`, and `agy-buzz-state`. The native file-lock dependency and its bundled support packages are included in the archive. No npm-registry publication is required to install an archive.
 
 Generate the custom harness settings using your actual installation paths:
 

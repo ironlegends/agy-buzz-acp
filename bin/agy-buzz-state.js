@@ -33,7 +33,8 @@ try {
     }
     const sourceDir = resolve(values.source);
     const destinationDir = resolve(values.destination);
-    const configured = createConfiguredSessionState({ ...process.env, AGY_SESSION_DIR: sourceDir });
+    const configured = createConfiguredSessionState({ ...process.env, AGY_SESSION_DIR: sourceDir,
+      BUZZ_RELAY_URL: process.env.BUZZ_RELAY_URL ?? process.env.AGY_RELAY_URL });
     if (configured.configurationError || !configured.enabled) {
       throw Object.assign(new Error(configured.configurationError ?? 'session owner and relay are required'),
         { code: 'AGY_STATE_MIGRATION_ARGUMENT' });
@@ -45,7 +46,7 @@ try {
       relay: process.env.BUZZ_RELAY_URL ?? process.env.AGY_RELAY_URL,
       apply: values.apply
     });
-    const state = result.applied ? 'published' : 'validated; no files written';
+    const state = result.applied ? 'published' : 'validated; no destination published';
     process.stdout.write(`${state}: ${result.recordCount} records, ${result.blockedCount} blocked\n`);
   }
 } catch (error) {

@@ -117,7 +117,7 @@ export async function readSessionStateFile(path, maxBytes = 64 * 1024) {
   }
 }
 
-function markerFor(owner, relayHash) {
+export function createSessionStateStoreMarker(owner, relayHash) {
   if (!OWNER_RE.test(owner ?? '') || !HASH_RE.test(relayHash ?? '')) {
     throw storeError('agy session state store binding is invalid', 'AGY_SESSION_STATE_STORE_MISMATCH');
   }
@@ -164,7 +164,7 @@ export async function initializeSessionStateStore({ dir, owner, relayHash, lockF
   if (typeof dir !== 'string' || !dir.trim() || !isAbsolute(dir) || typeof lockFn !== 'function') {
     throw storeError('agy session state directory is invalid', 'AGY_SESSION_STATE_PATH');
   }
-  const expected = markerFor(owner, relayHash);
+  const expected = createSessionStateStoreMarker(owner, relayHash);
   const path = resolve(dir);
   await assertNoSymlinkAncestors(path);
   const lock = await acquireSessionStateStoreInitializationLock(path, lockFn);

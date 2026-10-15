@@ -9,7 +9,7 @@ import {
   acquireSessionStateStoreInitializationLock,
   assertSafeSessionStatePath,
   canonicalChannelId,
-  initializeSessionStateStore,
+  createSessionStateStoreMarker,
   readSessionStateFile,
   sessionStateChannelHash,
   sessionStateStoreMarkerPath,
@@ -210,7 +210,6 @@ async function verifyStage(stageDir, expectedOwner, expectedRelay, records) {
 async function buildStage(stageDir, owner, relayHash, records) {
   await mkdir(stageDir, { mode: 0o700 });
   await chmod(stageDir, 0o700);
-  await initializeSessionStateStore({ dir: stageDir, owner, relayHash });
   for (const record of records) {
     const path = join(stageDir, record.destinationName);
     const handle = await open(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600);
@@ -218,6 +217,11 @@ async function buildStage(stageDir, owner, relayHash, records) {
     finally { await handle.close(); }
     await chmod(path, 0o600);
   }
+  // A partial stage must remain unmarked so runtime initialization refuses it.
+  // Publish its marker only after every validated record has been copied.
+  const marker = await open(sessionStateStoreMarkerPath(stageDir), constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600);
+  try { await marker.writeFile(`${JSON.stringify(createSessionStateStoreMarker(owner, relayHash))}\n`, 'utf8'); }
+  finally { await marker.close(); }
   await verifyStage(stageDir, owner, relayHash, records);
 }
 

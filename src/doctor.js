@@ -210,10 +210,10 @@ function canonicalRelay(value) {
   }
 }
 
-function inspectSessionRelay(env, sessionConfigured) {
+function inspectSessionRelay(env, sessionConfigured, label = 'durable session state') {
   if (!sessionConfigured) return { configured: false, status: 'pass', message: 'Session relay prerequisite is inactive' };
   if (!hasValue(env, 'BUZZ_RELAY_URL')) {
-    return { configured: false, status: 'fail', message: 'BUZZ_RELAY_URL is required when durable session state is enabled' };
+    return { configured: false, status: 'fail', message: `BUZZ_RELAY_URL is required when ${label} is enabled` };
   }
   const buzzRelay = canonicalRelay(env.BUZZ_RELAY_URL);
   if (!buzzRelay) return { configured: true, status: 'fail', message: 'BUZZ_RELAY_URL is malformed or contains unsupported credentials' };
@@ -329,12 +329,17 @@ async function inspectStore(env, directoryKey, ownerKey, label, fsImpl, platform
 async function inspectState(env, fsImpl, platform, { processAliveImpl } = {}) {
   const sessionConfigured = hasValue(env, 'AGY_SESSION_DIR') || hasValue(env, 'AGY_SESSION_OWNER');
   const sessionRelay = inspectSessionRelay(env, sessionConfigured);
+  const outboxConfigured = hasValue(env, 'AGY_OUTBOX_DIR') || hasValue(env, 'AGY_OUTBOX_OWNER');
+  const outboxRelay = inspectSessionRelay({ BUZZ_RELAY_URL: env.BUZZ_RELAY_URL }, outboxConfigured, 'delivery outbox');
   const stores = {
     outbox: await inspectStore(env, 'AGY_OUTBOX_DIR', 'AGY_OUTBOX_OWNER', 'Delivery outbox', fsImpl, platform),
     session: await inspectStore(env, 'AGY_SESSION_DIR', 'AGY_SESSION_OWNER', 'Session state', fsImpl, platform)
   };
   if (sessionRelay.status === 'fail') {
     stores.session = { ...stores.session, configured: true, status: 'fail', message: `${stores.session.message}; ${sessionRelay.message}` };
+  }
+  if (outboxRelay.status === 'fail') {
+    stores.outbox = { ...stores.outbox, configured: true, status: 'fail', message: `${stores.outbox.message}; ${outboxRelay.message}` };
   }
   for (const [name, key] of [['outbox', 'AGY_OUTBOX_DIR'], ['session', 'AGY_SESSION_DIR']]) {
     const store = stores[name];
@@ -360,7 +365,7 @@ async function inspectState(env, fsImpl, platform, { processAliveImpl } = {}) {
   const message = configuredStores.length === 0
     ? 'Optional durable state is disabled'
     : Object.entries(stores).filter(([, store]) => store.configured).map(([name, store]) => `${name}: ${store.message}`).join('; ');
-  return { configured: configuredStores.length > 0, status, message, stores, sessionRelay };
+  return { configured: configuredStores.length > 0, status, message, stores, sessionRelay, outboxRelay };
 }
 
 export async function runDoctor({
@@ -401,10 +406,12 @@ export async function runDoctor({
     check('buzz-command', commands.buzz.status, commands.buzz.message),
     check('optional-state', state.status, state.message)];
   const relayConfigured = hasValue(diagnosticEnv, 'BUZZ_RELAY_URL') || hasValue(diagnosticEnv, 'AGY_RELAY_URL');
-  const relay = { configured: relayConfigured, status: state.sessionRelay.status, message: state.sessionRelay.status === 'fail'
-    ? state.sessionRelay.message
+  const relayFailure = [state.sessionRelay, state.outboxRelay].find(check => check.status === 'fail');
+  const relay = { configured: relayConfigured, status: relayFailure ? 'fail' : 'pass', message: relayFailure
+    ? relayFailure.message
     : relayConfigured ? 'Relay URL is configured; this does not enable persistence' : 'No relay URL is configured' };
-  checks.push(check('session-relay', relay.status, relay.message));
+  checks.push(check('session-relay', state.sessionRelay.status, state.sessionRelay.message));
+  checks.push(check('outbox-relay', state.outboxRelay.status, state.outboxRelay.message));
   const report = { doctorVersion: DOCTOR_VERSION, mode: checkCapabilities ? 'capabilities' : 'offline', platform, cwd, ok: false,
     node: nodeCheck, adapter: { configuredVersion: harnessInfo.report.adapter?.configuredVersion ?? null, runningVersion: null, runningStatus: 'unknown' },
     commands, state, relay, checks, harness: harnessInfo.report };

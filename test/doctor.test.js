@@ -112,7 +112,7 @@ test('offline doctor resolves configured executable paths containing spaces', as
       AGY_COMMAND: fixture.agy,
       BUZZ_CLI_COMMAND: fixture.buzz,
       AGY_OUTBOX_DIR: join(fixture.root, 'state with spaces'),
-      AGY_OUTBOX_OWNER: 'a'.repeat(64)
+      AGY_OUTBOX_OWNER: 'a'.repeat(64), BUZZ_RELAY_URL: 'wss://relay.example.test'
     },
     cwd: fixture.root,
     nodeVersion: '22.0.0',
@@ -133,7 +133,7 @@ test('Windows state diagnostics warn that ACL privacy needs a separate check', a
       AGY_COMMAND: fixture.agy,
       BUZZ_CLI_COMMAND: fixture.buzz,
       AGY_OUTBOX_DIR: fixture.root,
-      AGY_OUTBOX_OWNER: 'a'.repeat(64)
+      AGY_OUTBOX_OWNER: 'a'.repeat(64), BUZZ_RELAY_URL: 'wss://relay.example.test'
     },
     platform: 'win32',
     nodeVersion: '22.0.0'
@@ -142,6 +142,17 @@ test('Windows state diagnostics warn that ACL privacy needs a separate check', a
   assert.equal(report.state.status, 'warn');
   assert.match(report.state.message, /ACL/i);
   assert.equal(report.ok, true);
+});
+
+test('outbox readiness requires the actual Buzz relay even without session persistence', async t => {
+  const fixture = await executableFixture(t);
+  const dir = join(fixture.root, 'outbox');
+  await mkdir(dir, { mode: 0o700 });
+  const report = await runDoctor({ env: { AGY_COMMAND: fixture.agy, BUZZ_CLI_COMMAND: fixture.buzz,
+    AGY_OUTBOX_DIR: dir, AGY_OUTBOX_OWNER: 'a'.repeat(64) }, platform: 'linux' });
+  assert.equal(report.ok, false);
+  assert.equal(report.state.stores.outbox.status, 'fail');
+  assert.match(report.state.stores.outbox.message, /BUZZ_RELAY_URL/);
 });
 
 test('a relay URL alone leaves both persistence stores disabled', async () => {

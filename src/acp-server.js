@@ -9,6 +9,7 @@ import { BuzzPublisher } from './buzz-publisher.js';
 import { createConfiguredOutbox } from './delivery/outbox.js';
 import { getBuzzPublicKey } from './delivery/identity.js';
 import { ownershipFailureReason, createConfiguredSessionState } from './session-state.js';
+import { canonicalChannelId } from './session-state-store.js';
 import { listModels, modelConfigOptions } from './models.js';
 import { createSteeringCoordinator, inspectSteeringBridge, reconcileSteeringBridge, MAX_STEERING_TEXT_LENGTH, readBooleanFlag } from './steering.js';
 import { attachLineDecoder, FRAME_TOO_LARGE, FRAME_INVALID_UTF8, resolveFrameLimits } from './frame-codec.js';
@@ -124,6 +125,8 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
   let initialized = false;
   let closing = false;
   function steeringLocation(channelId) {
+    channelId = canonicalChannelId(channelId);
+    if (!channelId) throw steeringRpcError('agy steering channel is invalid', -32602);
     const ownerId = resolvedSteeringConfig.ownerId ?? sessionState?.owner;
     const rootDir = resolvedSteeringConfig.rootDir ?? join(tmpdir(), 'agy-buzz-steering');
     const bridgeKey = createHash('sha256').update(`${ownerId ?? 'test'}:${channelId}`).digest('hex');

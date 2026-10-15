@@ -7,6 +7,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 const here = resolve(process.argv[5]);
 const fixtures = fileURLToPath(new URL('../fixtures/', import.meta.url));
 const runtime = resolve(process.argv[2]);
+const runtimeVersion = JSON.parse(await readFile(join(runtime, 'package.json'), 'utf8')).version;
 const { acquireNativeLock } = await import(pathToFileURL(join(runtime, 'src/native-lock.js')));
 const selection = process.argv[3] || '';
 const suffix = process.argv[4] || '';
@@ -56,7 +57,7 @@ async function harness(name, { uncertain = false } = {}) {
   };
   const context = (text) => [{ type: 'text', text: `<context>\nChannel: synthetic (#${channel})\nThread root: ${replyTo}\n</context>` }, { type: 'text', text }];
   const initialization = await call('initialize', { protocolVersion: 1 });
-  assert.match(initialization.result.agentInfo.version, /^0\.5\./);
+  assert.equal(initialization.result.agentInfo.version, runtimeVersion);
   const fresh = await call('session/new', { cwd: dir }); const sessionId = fresh.result.sessionId;
   const app = { dir, proc, sessionId, call, wire, initialization, context,
     trace: () => jsonLines(join(dir, 'trace.jsonl')),
