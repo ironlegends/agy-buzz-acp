@@ -1,0 +1,105 @@
+{
+  "manifestVersion": 1,
+  "observedAt": "2026-10-15",
+  "candidate": {
+    "version": "0.6.0",
+    "status": "unreleased"
+  },
+  "nodeSupport": {
+    "engine": ">=22",
+    "maintainedLtsMajors": [22, 24],
+    "blockingCi": {
+      "majors": [22, 24],
+      "operatingSystems": ["ubuntu-latest", "windows-latest", "macos-latest"]
+    },
+    "exploratoryCi": {
+      "major": 26,
+      "blocking": false,
+      "operatingSystems": ["ubuntu-latest", "windows-latest", "macos-latest"]
+    },
+    "localObservedVersion": "24.14.0"
+  },
+  "environmentObservations": {
+    "antigravityCli": {
+      "priorObservation": {
+        "observedVersion": "1.3.3",
+        "observedAt": "2026-10-15",
+        "modelsCommand": {
+          "verifiedModelCount": 6
+        },
+        "fullTurn": "not-run-during-this-observation"
+      },
+      "canary": {
+        "observedVersion": "1.3.5",
+        "observedAt": "2026-10-15",
+        "runtime": {
+          "node": "24.14.0",
+          "platform": "win32"
+        },
+        "modelsCommand": {
+          "verifiedModelCount": 6
+        },
+        "acp": {
+          "initialize": "passed",
+          "normalTurn": "passed",
+          "checkpointResume": "passed-same-conversation",
+          "cancel": "passed",
+          "eventsObserved": [
+            "init",
+            "result",
+            "step_update:agent_response",
+            "step_update:system_message",
+            "step_update:user_input"
+          ]
+        },
+        "publisher": {
+          "mode": "fake",
+          "fakePublications": 2,
+          "realPublications": 0
+        },
+        "steering": {
+          "status": "not-run",
+          "reason": "requires-dedicated-hook"
+        }
+      },
+      "versionChangeProvenance": "Version 1.3.5 was observed after the earlier 1.3.3 observation; no explicit update command was recorded."
+    },
+    "buzzDesktop": {
+      "installedFileVersion": {
+        "value": "0.5.26",
+        "source": "fileVersion"
+      },
+      "registryVersion": {
+        "value": "0.5.23",
+        "status": "stale-relative-to-installed-file-version"
+      },
+      "latestObservedVersion": {
+        "value": "0.5.28",
+        "installed": false,
+        "tested": false
+      },
+      "candidateInstalled": false
+    }
+  },
+  "protocols": {
+    "acp": {
+      "version": 1
+    },
+    "checkpoint": {
+      "currentRecordVersion": 1,
+      "canonicalStoreVersion": null,
+      "canonicalStoreStatus": "planned"
+    },
+    "outbox": {
+      "legacyVersion": 1,
+      "proposedVersion": 2,
+      "proposedBindingStatus": "under-review"
+    }
+  },
+  "claims": {
+    "isolatedProviderCanaryCompleted": true,
+    "realBuzzPublicationVerified": false,
+    "candidateBuzzInstallationVerified": false,
+    "futureProviderCompatibilityPromised": false
+  }
+}

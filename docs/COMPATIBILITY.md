@@ -12,13 +12,26 @@
 
 Do not substitute one level for another. In particular, CI on an OS does not prove that an authenticated Antigravity binary is available or supported there.
 
+## Version 0.6.0 candidate baseline (2026-10-15)
+
+Version 0.6.0 is an unreleased candidate. The package requires Node.js 22 or newer. The maintained LTS majors, Node 22 and 24, are the blocking CI targets on Ubuntu, Windows and macOS. Node 26 is an exploratory CI target on the same operating systems and does not block the build. CI and fixture results establish adapter behavior for those test environments; they do not establish provider availability or compatibility with a live Buzz installation.
+
+The isolated ACP canary ran on Node.js 24.14.0 on Windows with the installed Antigravity CLI at version 1.3.5. The earlier CLI observation on 2026-10-15 was version 1.3.3; no explicit update command between those observations was recorded. Both model listings returned six verified models. The canary passed ACP initialization, a normal turn, checkpoint resume with the same conversation, and cancellation. It used a fake publisher, producing two fake publications and zero real publications. Observed ACP events included `init`, `result` and `step_update` with `agent_response`, `system_message` and `user_input` content. Steering was not run because the dedicated hook was not configured. This canary does not establish real relay delivery or installation in Buzz Desktop.
+
+The installed Buzz Desktop file version was 0.5.26. The registry reported 0.5.23, which is stale relative to that installed file observation. Version 0.5.28 was observed as the latest version, but it has not been installed or tested. The candidate has not been installed into Buzz Desktop.
+
+The adapter advertises ACP protocol version 1. The current checkpoint record version is 1; a canonical-store version is planned, with no version number claimed here. Outbox version 1 is the legacy format. Outbox version 2 and its binding remain under review. These protocol observations do not promise compatibility with future providers or proposed formats.
+
+When changing runtime support, verify the maintained Node.js LTS majors, update the engine and blocking CI matrix together, and keep exploratory majors explicitly non-blocking until they are adopted as supported targets. Keep the fixture suite and extracted-package smoke test in the blocking matrix for each supported OS and Node major. Refresh `package-lock.json` from the declared dependency graph, keep `bundledDependencies` aligned with the packages required by the extracted runtime, and preserve each dependency's license metadata. Pin GitHub Actions to full commit SHAs verified against their official version tags, with the version retained in a comment. Date and label local version observations separately from fixture results and live-provider or Buzz installation checks.
+
 ## Release status and succession
 
 | Version | Status | Operational meaning |
 | --- | --- | --- |
+| 0.6.0 | Unreleased candidate | Compatibility baseline recorded below; no candidate Buzz installation or real relay publication has been completed. |
 | 0.5.8 | Historical public release | The published release documented below. |
 | 0.5.9 | Superseded draft | Already installed in some environments; preserve its archive and exact checksum for rollback history. |
-| 0.5.10 | Current release line | Use the published v0.5.10 release assets when available; draft assets are not releases. |
+| 0.5.10 | Existing release line | Use published v0.5.10 release assets when available; draft assets are not releases. |
 
 The 0.5.10 release line is based on source commit `8e9886c836b5c96fb0347027327c334237fa4a4a`, with the same tree as commit `5e24970`. The initial candidate archive used for these checks had SHA-256 `dc53db97ce8bb1ad61aa985afec10ec72a99d47cc22a0731f28398ec65418750`; for a later documentation-only rebuild, use the current archive checksum in the release notes because this hash identifies the tested initial candidate. Candidate checks recorded 457 tests: 453 passed, 0 failed and 4 skipped; CI runs [34709072710](https://github.com/ironlegends/agy-buzz-acp/actions/runs/34709072710) and [34709074250](https://github.com/ironlegends/agy-buzz-acp/actions/runs/34709074250) each completed 9/9. These are source, package and CI checks; they do not by themselves constitute live 0.5.10 Buzz validation.
 
