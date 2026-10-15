@@ -273,6 +273,7 @@ test('a blocked peer session without an explicit cancel cannot transfer or recon
 
     const contenderId = await harness.newSession();
     const refused = await harness.prompt(contenderId, 'must stay blocked');
+    assert.equal(refused?.error?.code, -32003);
     assert.equal(refused?.error?.message, 'agy channel session is already owned');
     assert.equal(harness.sessions[1].promptTexts.length, 0);
     assert.equal(oldSession.recoveryRetirements, 0);

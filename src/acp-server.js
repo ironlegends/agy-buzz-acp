@@ -17,6 +17,8 @@ import { attachLineDecoder, FRAME_TOO_LARGE, FRAME_INVALID_UTF8, resolveFrameLim
 const JSON_RPC = '2.0';
 const ADAPTER_VERSION = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
 const TERMINAL_SESSION_CONTEXT_MESSAGE = 'agy session context lost; resume unsupported';
+// Implementation-specific conflict: ACP reserves -32002 for resource-not-found.
+const SESSION_CONFLICT_RPC_CODE = -32003;
 const STEERING_RPC_CODE = -32004;
 const STEERING_UNCERTAIN_MESSAGE = 'agy steering outcome is uncertain';
 const OWNER_RE = /^[0-9a-f]{64}$/i;
@@ -372,7 +374,9 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
       if (message.method === 'session/set_config_option') {
         const entry = sessions.get(params.sessionId);
         if (!entry) throw Object.assign(new Error('unknown session'), { rpcCode: -32001 });
-        if (activeTurns.has(params.sessionId)) throw Object.assign(new Error('session turn is busy'), { rpcCode: -32002 });
+        if (activeTurns.has(params.sessionId)) throw Object.assign(new Error('session turn is busy'), {
+          rpcCode: SESSION_CONFLICT_RPC_CODE, rpcMessage: 'session turn is busy'
+        });
         const configId = params.configId ?? params.id;
         if (configId !== 'model') throw Object.assign(new Error('unknown config option'), { rpcCode: -32602 });
         const value = params.value;
@@ -405,11 +409,13 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
         const entry = sessions.get(params.sessionId);
         if (!entry) throw Object.assign(new Error('unknown session'), { rpcCode: -32001 });
         let session = entry.session;
-        if (activeTurns.has(params.sessionId)) throw Object.assign(new Error('session turn is busy'), { rpcCode: -32002 });
+        if (activeTurns.has(params.sessionId)) throw Object.assign(new Error('session turn is busy'), {
+          rpcCode: SESSION_CONFLICT_RPC_CODE, rpcMessage: 'session turn is busy'
+        });
         if (entry.stateError) throw Object.assign(new Error(entry.stateError), { rpcCode: -32603, rpcMessage: entry.stateError });
         if (entry.channelTransferInvalidated) {
           throw Object.assign(new Error('agy ACP session no longer owns the channel'), {
-            rpcCode: -32002, rpcMessage: 'agy ACP session no longer owns the channel'
+            rpcCode: SESSION_CONFLICT_RPC_CODE, rpcMessage: 'agy ACP session no longer owns the channel'
           });
         }
         const text = promptToText(params.prompt);
@@ -461,7 +467,7 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
                 (safeCheckpointTransfer || explicitCancelRecovery));
               if (!transferable) {
                 throw Object.assign(new Error('agy channel session is already owned'), {
-                  rpcCode: -32002, rpcMessage: 'agy channel session is already owned'
+                  rpcCode: SESSION_CONFLICT_RPC_CODE, rpcMessage: 'agy channel session is already owned'
                 });
               }
               if (explicitCancelRecovery) {
@@ -474,7 +480,7 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
                   const saved = await sessionState.load(stateScope);
                   if (!saved) {
                     throw Object.assign(new Error('agy cancelled session has no durable checkpoint'), {
-                      rpcCode: -32002, rpcMessage: 'agy cancelled session has no durable checkpoint'
+                      rpcCode: SESSION_CONFLICT_RPC_CODE, rpcMessage: 'agy cancelled session has no durable checkpoint'
                     });
                   }
                 } catch (error) {
@@ -483,7 +489,7 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
                 }
                 if (!cancelledCheckpoint) {
                   throw Object.assign(new Error('agy cancelled session checkpoint is not blocked'), {
-                    rpcCode: -32002, rpcMessage: 'agy cancelled session checkpoint is not blocked'
+                    rpcCode: SESSION_CONFLICT_RPC_CODE, rpcMessage: 'agy cancelled session checkpoint is not blocked'
                   });
                 }
                 if (existingEntry.steering?.enabled && !steeringFactory) {
@@ -523,7 +529,7 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
                 if (deliveryRefusal) {
                   report(`channel transfer refused channel=${buzzContext.channelId} reason=${deliveryRefusal}`);
                   throw Object.assign(new Error('agy channel session transfer is not yet safe'), {
-                    rpcCode: -32002, rpcMessage: 'agy channel session transfer is not yet safe'
+                    rpcCode: SESSION_CONFLICT_RPC_CODE, rpcMessage: 'agy channel session transfer is not yet safe'
                   });
                 }
               }
@@ -594,7 +600,7 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
             );
             if (transferFrom && (!saved || saved.status !== 'ready') && !explicitCancelWithoutConversation) {
               throw Object.assign(new Error('agy channel session transfer requires a ready checkpoint'), {
-                rpcCode: -32002, rpcMessage: 'agy channel session transfer requires a ready checkpoint'
+                rpcCode: SESSION_CONFLICT_RPC_CODE, rpcMessage: 'agy channel session transfer requires a ready checkpoint'
               });
             }
             if (transferFrom) {

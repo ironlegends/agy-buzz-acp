@@ -526,6 +526,6 @@ test('reserves a session before asynchronous identity checks race', async () => 
     releaseIdentity();
     await first;
     const messages = wire.trim().split('\n').map((line) => JSON.parse(line));
-    assert.equal(messages.find((message) => message.id === 4).error.code, -32002);
+    assert.equal(messages.find((message) => message.id === 4).error.code, -32003);
   } finally { await server.close(); await rm(dir, { recursive: true, force: true }); }
 });

@@ -1043,7 +1043,8 @@ test('keeps a session turn active through provider work and fails closed after c
   await new Promise((resolve) => setImmediate(resolve));
   send({ jsonrpc: '2.0', id: 4, method: 'session/prompt', params: { sessionId: session.result.sessionId, prompt: promptWithText('second') } });
   const busy = await waitFor((message) => message.id === 4);
-  assert.equal(busy.error.code, -32002);
+  assert.equal(busy.error.code, -32003);
+  assert.equal(busy.error.message, 'session turn is busy');
   send({ jsonrpc: '2.0', method: 'session/cancel', params: { sessionId: session.result.sessionId } });
   const cancelled = await waitFor((message) => message.id === 3);
   assert.equal(cancelled.result.stopReason, 'cancelled');
