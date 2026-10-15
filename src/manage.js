@@ -50,6 +50,7 @@ const MANAGER_CLAIM_PHASES = new Set([
   'ready-to-claim', 'claiming-harness', 'harness-claimed', 'publishing-harness', 'harness-published',
   'claiming-current-harness', 'current-harness-claimed', 'publishing-rollback', 'rollback-published', 'complete'
 ]);
+const MANAGER_PRECLAIM_PHASES = new Set(['ready-to-claim', 'claiming-harness', 'claiming-current-harness']);
 const MANAGER_SAFE_FAILURE_RE = /^[A-Za-z0-9_:-]{1,64}$/;
 
 function fail(message) {
@@ -264,13 +265,17 @@ function validateManagerJournal(value, journalPath) {
   if (value.claimPath !== null && !managerPath(value.claimPath)) return null;
   if (value.claimDigest !== null && !/^[a-f0-9]{64}$/i.test(value.claimDigest ?? '')) return null;
   if (value.failureCode !== null && !MANAGER_SAFE_FAILURE_RE.test(value.failureCode ?? '')) return null;
-  if (MANAGER_CLAIM_PHASES.has(value.phase) && (!value.claimPath || !value.claimDigest)) return null;
+  if (MANAGER_PRECLAIM_PHASES.has(value.phase) && (!value.claimPath || value.claimDigest !== null)) return null;
+  if (MANAGER_CLAIM_PHASES.has(value.phase) && !MANAGER_PRECLAIM_PHASES.has(value.phase) &&
+      (!value.claimPath || !value.claimDigest)) return null;
   if (value.claimPath === null && value.claimDigest !== null) return null;
-  if (value.claimPath !== null && value.claimDigest === null && value.phase !== 'failed') return null;
+  if (value.claimPath !== null && value.claimDigest === null && value.phase !== 'failed' &&
+      !MANAGER_PRECLAIM_PHASES.has(value.phase)) return null;
   if (value.claimPath !== null) {
     const claimName = basename(value.claimPath);
     const harnessName = basename(value.harnessPath);
-    if (!claimName.startsWith(`${harnessName}.claim-`) && !claimName.startsWith(`${harnessName}.rollback-current-`)) return null;
+    const expectedPrefix = value.action === 'install' ? `${harnessName}.claim-` : `${harnessName}.rollback-current-`;
+    if (!claimName.startsWith(expectedPrefix)) return null;
   }
   return value;
 }
@@ -806,7 +811,11 @@ export async function diagnoseManager({ harness, journal } = {}) {
   const lockFile = await readBoundedManagerFile(lockPath, 4 * 1024);
   const markerUnresolved = lockFile.present || lockFile.reason !== 'missing';
   const harnessFile = await readBoundedManagerFile(harnessPath);
-  const expectedCurrentDigest = parsedJournal ? parsedJournal.expectedTargetDigest : null;
+  const expectedCurrentDigest = parsedJournal
+    ? MANAGER_PRECLAIM_PHASES.has(parsedJournal.phase)
+      ? parsedJournal.expectedHarnessDigest
+      : parsedJournal.expectedTargetDigest
+    : null;
   const report = {
     schemaVersion: JOURNAL_SCHEMA_VERSION,
     status: 'insufficient-evidence',

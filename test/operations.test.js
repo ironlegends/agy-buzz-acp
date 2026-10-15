@@ -1,13 +1,15 @@
-import test from 'node:test';
+import test, { mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { gzipSync } from 'node:zlib';
 import { execFile as execFileCallback, spawn, spawnSync } from 'node:child_process';
+import fsPromises from 'node:fs/promises';
 import { once } from 'node:events';
 import { mkdir, mkdtemp, readdir, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { syncBuiltinESMExports } from 'node:module';
 import { promisify } from 'node:util';
 
 const execFile = promisify(execFileCallback);
@@ -67,6 +69,32 @@ async function setupManagerFixture(t) {
   await writeFile(archivePath, archiveBytes);
   t.after(() => rm(root, { recursive: true, force: true }));
   return { root, harnessPath, archivePath, archiveBytes, oldEntrypoint };
+}
+
+async function setupRollbackFixture(t) {
+  const manage = await import('../src/manage.js');
+  const fixture = await setupManagerFixture(t);
+  const original = await readFile(fixture.harnessPath);
+  const backupPath = `${fixture.harnessPath}.backup`;
+  await writeFile(backupPath, original);
+  const installedEntrypoint = join(fixture.root, 'versions', 'agy-buzz-acp-0.4.0', 'bin', 'agy-buzz-acp.js');
+  await mkdir(dirname(installedEntrypoint), { recursive: true });
+  await writeFile(installedEntrypoint, 'installed synthetic adapter\n');
+  const current = JSON.parse(original);
+  current.args[0] = installedEntrypoint;
+  const currentBytes = Buffer.from(JSON.stringify(current));
+  await writeFile(fixture.harnessPath, currentBytes);
+  await writeFile(`${backupPath}.receipt.json`, JSON.stringify({
+    version: 1,
+    harnessPath: fixture.harnessPath,
+    backupPath,
+    originalDigest: digest(original),
+    installedDigest: digest(currentBytes),
+    previousEntrypoint: fixture.oldEntrypoint,
+    installedEntrypoint
+  }));
+  const plan = await manage.planRollback({ backup: backupPath, harness: fixture.harnessPath });
+  return { ...fixture, plan };
 }
 
 async function createJunction(t, target) {
@@ -317,6 +345,135 @@ test('diagnosis refuses a substituted claim instead of following its target', as
   const substituted = await manage.diagnoseManager({ harness: fixture.harnessPath });
   assert.equal(substituted.status, 'indeterminate');
   assert.match(substituted.recommendation.reason, /conflict|claim|journal/i);
+});
+
+test('install diagnosis recognizes the claim before and after rename and remains fail-closed', async (t) => {
+  const manage = await import('../src/manage.js');
+  const fixture = await setupManagerFixture(t);
+  const plan = await manage.planInstall({
+    archive: fixture.archivePath,
+    sha256: digest(fixture.archiveBytes),
+    root: fixture.root,
+    harness: fixture.harnessPath
+  });
+  const snapshots = {};
+  const realRename = fsPromises.rename.bind(fsPromises);
+  mock.method(fsPromises, 'rename', async (source, target) => {
+    if (source !== fixture.harnessPath || !target.startsWith(`${fixture.harnessPath}.claim-`)) {
+      return realRename(source, target);
+    }
+
+    const claimingJournalBytes = await readFile(plan.journalPath);
+    const readyJournal = JSON.parse(claimingJournalBytes);
+    readyJournal.phase = 'ready-to-claim';
+    readyJournal.phaseHistory.pop();
+    readyJournal.updatedAt = readyJournal.phaseHistory.at(-1).at;
+    await writeFile(plan.journalPath, JSON.stringify(readyJournal));
+    snapshots.ready = await manage.diagnoseManager({ harness: fixture.harnessPath, journal: plan.journalPath });
+    await writeFile(plan.journalPath, claimingJournalBytes);
+
+    snapshots.before = await manage.diagnoseManager({ harness: fixture.harnessPath, journal: plan.journalPath });
+    const result = await realRename(source, target);
+    snapshots.after = await manage.diagnoseManager({ harness: fixture.harnessPath, journal: plan.journalPath });
+
+    const claimBytes = await readFile(target);
+    await writeFile(target, 'different synthetic claim bytes');
+    snapshots.wrongDigest = await manage.diagnoseManager({ harness: fixture.harnessPath, journal: plan.journalPath });
+    await writeFile(target, claimBytes);
+
+    const journalBytes = await readFile(plan.journalPath);
+    const malformed = JSON.parse(journalBytes);
+    malformed.claimDigest = 'malformed-digest';
+    await writeFile(plan.journalPath, JSON.stringify(malformed));
+    snapshots.malformed = await manage.diagnoseManager({ harness: fixture.harnessPath, journal: plan.journalPath });
+    await writeFile(plan.journalPath, journalBytes);
+    return result;
+  });
+  syncBuiltinESMExports();
+  try { await manage.applyInstall(plan); }
+  finally { mock.restoreAll(); syncBuiltinESMExports(); }
+
+  assert.equal(snapshots.ready.journal.valid, true);
+  assert.equal(snapshots.ready.journal.phase, 'ready-to-claim');
+  assert.equal(snapshots.ready.journal.claimDigest, null);
+  assert.equal(snapshots.ready.harness.associated, true);
+  assert.equal(snapshots.ready.claim.present, false);
+
+  assert.equal(snapshots.before.journal.valid, true);
+  assert.equal(snapshots.before.journal.phase, 'claiming-harness');
+  assert.equal(snapshots.before.journal.claimDigest, null);
+  assert.equal(snapshots.before.harness.associated, true);
+  assert.equal(snapshots.before.claim.present, false);
+
+  assert.equal(snapshots.after.journal.valid, true);
+  assert.equal(snapshots.after.journal.phase, 'claiming-harness');
+  assert.equal(snapshots.after.claim.expectedDigest, snapshots.after.journal.expectedHarnessDigest);
+  assert.equal(snapshots.after.claim.associated, true);
+  assert.equal(snapshots.after.status, 'interrupted');
+
+  assert.equal(snapshots.wrongDigest.journal.valid, true);
+  assert.equal(snapshots.wrongDigest.claim.associated, false);
+  assert.equal(snapshots.wrongDigest.status, 'indeterminate');
+  assert.equal(snapshots.malformed.journal.valid, false);
+  assert.equal(snapshots.malformed.journal.reason, 'invalid');
+  assert.equal(snapshots.malformed.status, 'indeterminate');
+});
+
+test('rollback diagnosis recognizes the current-harness claim before and after rename', async (t) => {
+  const manage = await import('../src/manage.js');
+  const fixture = await setupRollbackFixture(t);
+  const journalPath = `${fixture.harnessPath}.agy-journal.json`;
+  const snapshots = {};
+  const realRename = fsPromises.rename.bind(fsPromises);
+  mock.method(fsPromises, 'rename', async (source, target) => {
+    if (source !== fixture.harnessPath || !target.startsWith(`${fixture.harnessPath}.rollback-current-`)) {
+      return realRename(source, target);
+    }
+
+    const claimingJournalBytes = await readFile(journalPath);
+    const readyJournal = JSON.parse(claimingJournalBytes);
+    readyJournal.phase = 'ready-to-claim';
+    readyJournal.phaseHistory.pop();
+    readyJournal.updatedAt = readyJournal.phaseHistory.at(-1).at;
+    await writeFile(journalPath, JSON.stringify(readyJournal));
+    snapshots.ready = await manage.diagnoseManager({ harness: fixture.harnessPath, journal: journalPath });
+    await writeFile(journalPath, claimingJournalBytes);
+
+    snapshots.before = await manage.diagnoseManager({ harness: fixture.harnessPath, journal: journalPath });
+    const result = await realRename(source, target);
+    snapshots.after = await manage.diagnoseManager({ harness: fixture.harnessPath, journal: journalPath });
+
+    const claimBytes = await readFile(target);
+    await writeFile(target, 'different synthetic rollback claim bytes');
+    snapshots.wrongDigest = await manage.diagnoseManager({ harness: fixture.harnessPath, journal: journalPath });
+    await writeFile(target, claimBytes);
+    return result;
+  });
+  syncBuiltinESMExports();
+  try { await manage.applyRollback(fixture.plan); }
+  finally { mock.restoreAll(); syncBuiltinESMExports(); }
+
+  assert.equal(snapshots.ready.journal.valid, true);
+  assert.equal(snapshots.ready.journal.phase, 'ready-to-claim');
+  assert.equal(snapshots.ready.journal.claimDigest, null);
+  assert.equal(snapshots.ready.harness.associated, true);
+  assert.equal(snapshots.ready.claim.present, false);
+
+  assert.equal(snapshots.before.journal.valid, true);
+  assert.equal(snapshots.before.journal.action, 'rollback');
+  assert.equal(snapshots.before.journal.phase, 'claiming-current-harness');
+  assert.equal(snapshots.before.journal.claimDigest, null);
+  assert.equal(snapshots.before.harness.associated, true);
+  assert.equal(snapshots.before.claim.present, false);
+
+  assert.equal(snapshots.after.journal.valid, true);
+  assert.equal(snapshots.after.journal.phase, 'claiming-current-harness');
+  assert.equal(snapshots.after.claim.expectedDigest, snapshots.after.journal.expectedHarnessDigest);
+  assert.equal(snapshots.after.claim.associated, true);
+  assert.equal(snapshots.after.status, 'interrupted');
+  assert.equal(snapshots.wrongDigest.journal.valid, true);
+  assert.equal(snapshots.wrongDigest.claim.associated, false);
+  assert.equal(snapshots.wrongDigest.status, 'indeterminate');
 });
 
 test('diagnosis rejects invalid UTF-8 journals without exposing replacement text', async (t) => {

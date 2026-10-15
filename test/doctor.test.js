@@ -1,9 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
+import { constants as fsConstants } from 'node:fs';
 import { link, mkdtemp, mkdir, rm, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, posix, win32 } from 'node:path';
 import { parseDoctorArgs, runDoctor, runDoctorCli } from '../src/doctor.js';
 import { inspectStateDirectory, stateSummaryStatus } from '../src/status.js';
 
@@ -17,6 +18,66 @@ async function executableFixture(testContext) {
   await writeFile(buzz, 'placeholder', { mode: 0o700 });
   testContext.after(() => rm(root, { recursive: true, force: true }));
   return { root, agy, buzz };
+}
+
+function virtualHarnessFixture({ platform, failure } = {}) {
+  const pathApi = platform === 'win32' ? win32 : posix;
+  const root = platform === 'win32' ? 'C:\\fixture' : '/fixture';
+  const paths = {
+    harness: pathApi.join(root, 'harness.json'),
+    node: pathApi.join(root, platform === 'win32' ? 'node.exe' : 'node'),
+    adapter: pathApi.join(root, 'bin', 'agy-buzz-acp.js'),
+    package: pathApi.join(root, 'package.json'),
+    agy: pathApi.join(root, platform === 'win32' ? 'agy.exe' : 'agy'),
+    buzz: pathApi.join(root, platform === 'win32' ? 'buzz.exe' : 'buzz')
+  };
+  const failurePath = typeof failure?.target === 'string' ? paths[failure.target] ?? failure.target : null;
+  const secret = 'harness-secret-must-not-be-reported';
+  const harnessText = JSON.stringify({
+    id: 'doctor-fixture', command: paths.node, args: [paths.adapter],
+    env: { AGY_COMMAND: paths.agy, BUZZ_CLI_COMMAND: paths.buzz, AGY_TOKEN: secret }
+  });
+  const content = new Map([
+    [paths.harness, harnessText],
+    [paths.package, JSON.stringify({ name: 'agy-buzz-acp', version: '0.5.10' })]
+  ]);
+  const accessCalls = [];
+  const missing = (path, operation) => {
+    const error = new Error(`${operation} failed`);
+    error.code = 'ENOENT';
+    throw error;
+  };
+  const fsImpl = {
+    lstat: async (path) => {
+      if (failurePath === path && failure.kind === 'missing') missing(path, 'lstat');
+      if (!content.has(path) && ![paths.node, paths.adapter, paths.agy, paths.buzz].includes(path)) missing(path, 'lstat');
+      if (failurePath === path && failure.kind === 'directory') {
+        return { size: 0, isFile: () => false, isSymbolicLink: () => false };
+      }
+      if (failurePath === path && failure.kind === 'symlink') {
+        return { size: 0, isFile: () => false, isSymbolicLink: () => true };
+      }
+      return { size: Buffer.byteLength(content.get(path) ?? 'fixture'), isFile: () => true, isSymbolicLink: () => false };
+    },
+    readFile: async (path) => {
+      if (!content.has(path)) missing(path, 'readFile');
+      return content.get(path);
+    },
+    stat: async (path) => {
+      if (failurePath === path && failure.kind === 'missing') missing(path, 'stat');
+      if (![paths.node, paths.adapter, paths.agy, paths.buzz].includes(path)) missing(path, 'stat');
+      return { isFile: () => true };
+    },
+    access: async (path, mode) => {
+      accessCalls.push({ path, mode });
+      if (failurePath === path && failure.kind === 'inaccessible') {
+        const error = new Error('synthetic access refusal');
+        error.code = 'EACCES';
+        throw error;
+      }
+    }
+  };
+  return { fsImpl, paths, secret, accessCalls };
 }
 
 test('offline doctor is read-only, does not spawn commands, and omits secret values', async () => {
@@ -333,6 +394,91 @@ test('capability checks are explicit, bounded, shell-free, and discard command o
   assert.equal(calls.every(({ options }) => options.timeout === 50), true);
   assert.equal(JSON.stringify(report).includes('secret command output'), false);
   assert.equal(JSON.stringify(report).includes('secret error output'), false);
+});
+
+test('capability failures remain failures after later successful probes and set the CLI exit code', async (t) => {
+  const fixture = await executableFixture(t);
+  for (const failedFlag of ['--version', '--help']) {
+    const calls = [];
+    const output = { text: '', errors: '' };
+    const env = { AGY_COMMAND: fixture.agy, BUZZ_CLI_COMMAND: fixture.buzz, PATH: '' };
+    const fsImpl = {
+      stat: async (candidate) => ({ isFile: () => candidate === fixture.agy || candidate === fixture.buzz }),
+      access: async () => {}
+    };
+    const spawnImpl = (command, args) => {
+      calls.push({ command, args });
+      const child = new EventEmitter();
+      child.stdout = new EventEmitter();
+      child.stderr = new EventEmitter();
+      queueMicrotask(() => child.emit('close', command === fixture.agy && args[0] === failedFlag ? 1 : 0));
+      return child;
+    };
+    const doctorOptions = {
+      env, platform: process.platform, nodeVersion: '22.0.0', checkCapabilities: true, fsImpl, spawnImpl
+    };
+    const report = await runDoctor(doctorOptions);
+
+    assert.equal(report.commands.agy.capabilities[failedFlag.slice(2)].status, 'fail');
+    assert.equal(report.commands.agy.status, 'fail');
+    assert.equal(report.ok, false);
+
+    const exitCode = await runDoctorCli(['--capabilities', '--json'], {
+      env,
+      stdout: { write: (value) => { output.text += value; } },
+      stderr: { write: (value) => { output.errors += value; } },
+      runDoctorImpl: (options) => runDoctor({ ...options, ...doctorOptions })
+    });
+    assert.equal(exitCode, 1);
+    assert.equal(JSON.parse(output.text).ok, false);
+    assert.equal(output.errors, '');
+    assert.deepEqual(calls.slice(0, 3).map(({ args }) => args), [['--version'], ['--help'], ['--help']]);
+  }
+});
+
+test('harness diagnostics require real accessible Node and adapter files without exposing environment values', async () => {
+  for (const platform of ['win32', 'linux']) {
+    const fixture = virtualHarnessFixture({ platform });
+    const report = await runDoctor({
+      harness: fixture.paths.harness, cwd: platform === 'win32' ? 'C:\\fixture' : '/fixture',
+      env: {}, platform, nodeVersion: '22.0.0', fsImpl: fixture.fsImpl
+    });
+
+    assert.equal(report.harness.status, 'pass');
+    assert.equal(report.ok, true);
+    assert.equal(report.harness.adapter.configuredVersion, '0.5.10');
+    assert.equal(report.harness.adapter.runningVersion, null);
+    assert.equal(report.harness.adapter.runningStatus, 'unknown');
+    assert.ok(fixture.accessCalls.some(({ path, mode }) => path === fixture.paths.node &&
+      mode === (platform === 'win32' ? fsConstants.R_OK : fsConstants.X_OK)));
+    assert.ok(fixture.accessCalls.some(({ path, mode }) => path === fixture.paths.adapter && mode === fsConstants.R_OK));
+    assert.equal(JSON.stringify(report).includes(fixture.secret), false);
+  }
+
+  const failures = [
+    { platform: 'win32', target: 'node', kind: 'missing' },
+    { platform: 'linux', target: 'adapter', kind: 'missing' },
+    { platform: 'win32', target: 'node', kind: 'directory' },
+    { platform: 'linux', target: 'adapter', kind: 'symlink' },
+    { platform: 'linux', target: 'node', kind: 'inaccessible' },
+    { platform: 'win32', target: 'adapter', kind: 'inaccessible' }
+  ];
+  for (const failure of failures) {
+    const fixture = virtualHarnessFixture({
+      platform: failure.platform,
+      failure: { target: failure.target, kind: failure.kind }
+    });
+    const report = await runDoctor({
+      harness: fixture.paths.harness,
+      cwd: failure.platform === 'win32' ? 'C:\\fixture' : '/fixture',
+      env: {}, platform: failure.platform, nodeVersion: '22.0.0', fsImpl: fixture.fsImpl
+    });
+
+    assert.equal(report.harness.status, 'fail', `${failure.platform} ${failure.target} ${failure.kind}`);
+    assert.equal(report.ok, false, `${failure.platform} ${failure.target} ${failure.kind}`);
+    assert.equal(report.harness.adapter.runningVersion, null);
+    assert.equal(JSON.stringify(report).includes(fixture.secret), false);
+  }
 });
 
 test('CLI wrapper exposes help without loading or invoking the adapter runtime', async () => {

@@ -89,6 +89,24 @@ async function inspectHarness(value, { fsImpl, cwd = process.cwd(), platform = p
     typeof harness.command === 'string' && agy && buzz);
   if (!shapeValid) return { report: { ...harnessBase(), message: 'Harness is not a supported agy-buzz-acp setup document' }, env };
 
+  const accessibleRegularFile = async (path, mode) => {
+    try {
+      const details = await fsImpl.lstat(path);
+      if (details?.isSymbolicLink?.() || !details?.isFile?.()) return false;
+      await fsImpl.access(path, mode);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const nodeMode = platform === 'win32' ? fsConstants.R_OK : fsConstants.X_OK;
+  if (!await accessibleRegularFile(node.value, nodeMode)) {
+    return { report: { ...harnessBase(), message: 'Harness Node executable is not a regular accessible file' }, env };
+  }
+  if (!await accessibleRegularFile(adapter.value, fsConstants.R_OK)) {
+    return { report: { ...harnessBase(), message: 'Harness adapter is not a regular readable file' }, env };
+  }
+
   let configuredVersion = null;
   try {
     const packagePath = adapter.paths.join(adapter.paths.dirname(adapter.value), '..', 'package.json');
@@ -260,17 +278,16 @@ async function inspectCommand(id, variable, defaultCommand, { env, platform, fsI
   const capabilities = {};
   if (checkCapabilities && nodeSupported && !rejected && executable) {
     const safeFlags = variable === 'BUZZ_CLI_COMMAND' ? ['--help'] : ['--version', '--help'];
+    let capabilityFailed = false;
     for (const flag of safeFlags) {
       const result = await capabilityCheck(executable?.path ?? command, flag, { cwd, env, timeoutMs, spawnImpl });
       capabilities[flag.slice(2)] = result;
       if (result.status === 'fail') {
-        status = 'fail';
-        message = `${variable} capability check failed`;
-      } else {
-        status = 'pass';
-        message = `${variable} responds to safe capability checks`;
+        capabilityFailed = true;
       }
     }
+    status = capabilityFailed ? 'fail' : 'pass';
+    message = capabilityFailed ? `${variable} capability check failed` : `${variable} responds to safe capability checks`;
   }
   return { command: executable?.path ?? null, configured, path: executable?.path ?? null, source: executable?.source ?? null, status, message, ...(checkCapabilities ? { capabilities } : {}) };
 }
@@ -460,7 +477,8 @@ export function doctorUsage() {
 export async function runDoctorCli(argv = process.argv.slice(2), {
   env = process.env,
   stdout = process.stdout,
-  stderr = process.stderr
+  stderr = process.stderr,
+  runDoctorImpl = runDoctor
 } = {}) {
   try {
     const options = parseDoctorArgs(argv);
@@ -472,7 +490,7 @@ export async function runDoctorCli(argv = process.argv.slice(2), {
       stdout.write(`${DOCTOR_VERSION}\n`);
       return 0;
     }
-    const report = await runDoctor({ ...options, env });
+    const report = await runDoctorImpl({ ...options, env });
     stdout.write(options.json ? `${JSON.stringify(report)}\n` : formatDoctorReport(report));
     return report.ok ? 0 : 1;
   } catch (error) {
