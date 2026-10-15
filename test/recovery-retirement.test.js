@@ -37,7 +37,7 @@ test('unconfirmed retirement prevents disk reconciliation and concurrent recover
   const dir = await mkdtemp(join(tmpdir(), 'agy-unclosed-'));
   const owner = 'ab'.repeat(32), channelId = '123e4567-e89b-42d3-a456-426614174000';
   const state = new SessionState({ dir: join(dir, 'sessions'), owner, relay: 'wss://probe.invalid' });
-  const outbox = new DeliveryOutbox({ dir: join(dir, 'outbox'), owner });
+  const outbox = new DeliveryOutbox({ dir: join(dir, 'outbox'), owner, relay: 'wss://probe.invalid' });
   const c = hungChild(); let spawned = false;
   const s = new AgySession({ spawnFn: () => { spawned = true; return c; }, retireTimeoutMs: 150 });
   const output = new PassThrough(); let wire = ''; output.on('data', (v) => { wire += v; });

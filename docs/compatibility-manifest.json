@@ -31,6 +31,7 @@
       },
       "canary": {
         "observedVersion": "1.3.5",
+        "binarySha256": "4790560754318d0ced2358d13cbce9181dfc51d1964c3d95c9776e8eaf5cd3c4",
         "observedAt": "2026-10-15",
         "runtime": {
           "node": "24.14.0",
@@ -87,13 +88,14 @@
     },
     "checkpoint": {
       "currentRecordVersion": 1,
-      "canonicalStoreVersion": null,
-      "canonicalStoreStatus": "planned"
+      "canonicalStoreVersion": 1,
+      "canonicalStoreStatus": "implemented-unreleased"
     },
     "outbox": {
       "legacyVersion": 1,
-      "proposedVersion": 2,
-      "proposedBindingStatus": "under-review"
+      "currentWriteVersion": 2,
+      "bindingStatus": "implemented-unreleased",
+      "legacyPromotion": "refused-without-independent-provenance"
     }
   },
   "claims": {

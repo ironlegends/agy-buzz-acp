@@ -1,4 +1,5 @@
 import { inspectSteeringDiagnostics } from './steering-diagnostics.js';
+import { createHash } from 'node:crypto';
 import { constants as fsConstants, readFileSync } from 'node:fs';
 import { access, lstat, open, readdir, readFile, stat } from 'node:fs/promises';
 import { spawn as nodeSpawn } from 'node:child_process';
@@ -346,7 +347,9 @@ async function inspectState(env, fsImpl, platform, { processAliveImpl } = {}) {
     if (!store.configured || store.status === 'fail') continue;
     const summary = await inspectStateDirectory(env[key], {
       kind: name,
-      expectedOwner: name === 'outbox' ? env.AGY_OUTBOX_OWNER : null,
+      expectedOwner: name === 'outbox' ? env.AGY_OUTBOX_OWNER : env.AGY_SESSION_OWNER,
+      expectedRelayHash: canonicalRelay(env.BUZZ_RELAY_URL)
+        ? createHash('sha256').update(canonicalRelay(env.BUZZ_RELAY_URL)).digest('hex') : null,
       fsImpl,
       processAliveImpl
     });
@@ -356,7 +359,9 @@ async function inspectState(env, fsImpl, platform, { processAliveImpl } = {}) {
       store.statuses = summary.statuses;
     }
     store.scan = summary.scan;
-    if (stateSummaryStatus(summary) === 'warn' && store.status === 'pass') store.status = 'warn';
+    store.binding = summary.binding;
+    if (stateSummaryStatus(summary) === 'fail') store.status = 'fail';
+    else if (stateSummaryStatus(summary) === 'warn' && store.status === 'pass') store.status = 'warn';
   }
   const configuredStores = Object.values(stores).filter(({ configured }) => configured);
   const status = Object.values(stores).some(({ status: storeStatus }) => storeStatus === 'fail')

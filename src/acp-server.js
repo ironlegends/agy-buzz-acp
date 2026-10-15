@@ -162,7 +162,7 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
       if (typeof outbox.list !== 'function') return 'delivery outbox is disabled';
       const records = await outbox.list();
       return records.some((record) => record?.channelId?.toLowerCase() === channelId.toLowerCase() &&
-        (record.status === 'uncertain' || record.status === 'inflight'))
+        (record.status === 'uncertain' || record.status === 'inflight' || record.status === 'failed-before-start'))
         ? 'an unsettled delivery is waiting' : null;
     } catch { return 'delivery outbox is unreadable'; }
   };

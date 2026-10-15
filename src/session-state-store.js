@@ -80,17 +80,17 @@ export async function acquireSessionStateStoreInitializationLock(dir, lockFn = a
   return lockFn(join(INIT_LOCK_DIR, `${lockKey}.lock`));
 }
 
-export async function readSessionStateFile(path, maxBytes = 64 * 1024) {
-  const before = await lstat(path, { bigint: true });
+export async function readSessionStateFile(path, maxBytes = 64 * 1024, { fsImpl = { lstat, open } } = {}) {
+  const before = await fsImpl.lstat(path, { bigint: true });
   if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1n || before.size > BigInt(maxBytes)) {
     throw storeError('agy session state file is unsafe or exceeds its read limit', 'AGY_SESSION_STATE_FILE');
   }
   let handle;
   try {
     const flags = constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0);
-    handle = await open(path, flags);
+    handle = await fsImpl.open(path, flags);
     const opened = await handle.stat({ bigint: true });
-    const afterOpen = await lstat(path, { bigint: true });
+    const afterOpen = await fsImpl.lstat(path, { bigint: true });
     if (!opened.isFile() || !afterOpen.isFile() || opened.dev !== before.dev || opened.ino !== before.ino ||
         afterOpen.dev !== opened.dev || afterOpen.ino !== opened.ino || opened.nlink !== 1n ||
         afterOpen.nlink !== 1n || opened.size !== before.size || opened.mtimeNs !== before.mtimeNs ||
@@ -105,7 +105,7 @@ export async function readSessionStateFile(path, maxBytes = 64 * 1024) {
       bytesRead += result.bytesRead;
     }
     const afterRead = await handle.stat({ bigint: true });
-    const afterReadPath = await lstat(path, { bigint: true });
+    const afterReadPath = await fsImpl.lstat(path, { bigint: true });
     if (bytesRead > maxBytes || bytesRead !== Number(opened.size) ||
         !sameFile(opened, afterRead) || !sameFile(afterRead, afterReadPath)) {
       throw storeError('agy session state file changed while reading', 'AGY_SESSION_STATE_FILE');

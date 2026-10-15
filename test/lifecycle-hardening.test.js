@@ -56,7 +56,7 @@ function captureWire() {
 async function startDurableServer({ root, sessionFactory, publisherFactory, steering = false, saveOverride } = {}) {
   const state = new SessionState({ dir: join(root, 'state'), owner, relay });
   if (saveOverride) state.save = saveOverride(state.save.bind(state));
-  const outbox = new DeliveryOutbox({ dir: join(root, 'outbox'), owner });
+  const outbox = new DeliveryOutbox({ dir: join(root, 'outbox'), owner, relay });
   const input = new PassThrough();
   const wire = captureWire();
   const server = createAcpServer({

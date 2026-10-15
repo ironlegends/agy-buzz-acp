@@ -7,6 +7,8 @@ import { tmpdir } from 'node:os';
 import { join, posix, win32 } from 'node:path';
 import { parseDoctorArgs, runDoctor, runDoctorCli } from '../src/doctor.js';
 import { inspectStateDirectory, stateSummaryStatus } from '../src/status.js';
+import { DeliveryOutbox } from '../src/delivery/outbox.js';
+import { SessionState } from '../src/session-state.js';
 
 async function executableFixture(testContext) {
   const root = await mkdtemp(join(tmpdir(), 'agy doctor path with spaces-'));
@@ -153,6 +155,34 @@ test('outbox readiness requires the actual Buzz relay even without session persi
   assert.equal(report.ok, false);
   assert.equal(report.state.stores.outbox.status, 'fail');
   assert.match(report.state.stores.outbox.message, /BUZZ_RELAY_URL/);
+});
+
+test('offline doctor checks marked store bindings without changing either store', async t => {
+  const fixture = await executableFixture(t);
+  const owner = 'a'.repeat(64), relay = 'wss://relay.example.test';
+  const outboxDir = join(fixture.root, 'outbox'), stateDir = join(fixture.root, 'sessions');
+  const outbox = new DeliveryOutbox({ dir: outboxDir, owner, relay });
+  await outbox.begin({ channelId: '123e4567-e89b-12d3-a456-426614174000', replyTo: 'b'.repeat(64), content: 'synthetic retained answer' });
+  const state = new SessionState({ dir: stateDir, owner, relay });
+  await state.ensureOwnership('123e4567-e89b-12d3-a456-426614174000'); await state.release();
+  const { readFile, readdir } = await import('node:fs/promises');
+  const snapshot = async () => Promise.all([outboxDir, stateDir].map(async dir => Promise.all(
+    (await readdir(dir)).sort().map(async name => [name, (await readFile(join(dir, name))).toString('base64')]))));
+  const before = await snapshot();
+  for (const changed of [false, 'owner', 'relay']) {
+    const env = { AGY_COMMAND: fixture.agy, BUZZ_CLI_COMMAND: fixture.buzz, AGY_OUTBOX_DIR: outboxDir,
+      AGY_OUTBOX_OWNER: changed === 'owner' ? 'c'.repeat(64) : owner, AGY_SESSION_DIR: stateDir,
+      AGY_SESSION_OWNER: changed === 'owner' ? 'c'.repeat(64) : owner,
+      BUZZ_RELAY_URL: changed === 'relay' ? 'wss://other.invalid/private-query?redact-me' : relay };
+    const report = await runDoctor({ env, platform: 'linux' });
+    for (const kind of ['session', 'outbox']) {
+      assert.equal(report.state.stores[kind].binding.status, changed ? 'fail' : 'pass');
+      if (changed) assert.equal(report.state.stores[kind].status, 'fail');
+    }
+    assert.equal(report.ok, !changed);
+    assert.ok(!JSON.stringify(report).includes('redact-me'));
+    assert.deepEqual(await snapshot(), before);
+  }
 });
 
 test('a relay URL alone leaves both persistence stores disabled', async () => {

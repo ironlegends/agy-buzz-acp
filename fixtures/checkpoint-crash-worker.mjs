@@ -11,7 +11,7 @@ const {DeliveryOutbox}=await import(pathToFileURL(join(runtime,'src/delivery/out
 const [dir,mode,prior]=process.argv.slice(2);
 const owner='ab'.repeat(32), channelId='123e4567-e89b-42d3-a456-426614174000';
 const state=new SessionState({dir:join(dir,'state'),owner,relay:'wss://probe.invalid'});
-const outbox=new DeliveryOutbox({dir:join(dir,'outbox'),owner});
+const outbox=new DeliveryOutbox({dir:join(dir,'outbox'),owner,relay:'wss://probe.invalid'});
 const scope=await state.scope({channelId,cwd:dir,model:'gemini-3.8-flash-high'});
 if(prior==='yes' && mode!=='resume') await state.save(scope,'confirmed-conversation');
 const originalSave=state.save.bind(state), originalBegin=outbox.begin.bind(outbox), originalUpdate=outbox.update.bind(outbox);

@@ -135,12 +135,15 @@ Outbox persistence is disabled by default. Set `AGY_OUTBOX_DIR` and `AGY_OUTBOX_
 Records contain the final answer, destination, public owner, delivery state and timestamps. They do not contain prompts, provider credentials, private keys or environment dumps. These files are not encrypted. POSIX mode 0700/0600 is requested; on Windows, filesystem ACLs determine effective access. Provision a private directory for the account running Buzz and verify those ACLs before enabling storage. POSIX mode bits alone do not prove Windows privacy.
 
 ```sh
-agy-buzz-recover list
+agy-buzz-recover list --limit 100
 agy-buzz-recover show RECOVERY_ID
 agy-buzz-recover retry RECOVERY_ID
+agy-buzz-recover archive-sent --archive-dir /separate/private/archive
 ```
 
 The recovery command verifies the current public Buzz identity. `show` intentionally prints the retained answer. `retry` only accepts `failed-before-start` and claims the record before publishing. A legacy retry-lock directory remains blocked for operator reconciliation. A native lock file may remain after release; file presence alone does not establish that the lock is held. It never retries `sent`, `uncertain`, or an interrupted publication blindly.
+
+Listing is explicitly paginated. Pass the returned `nextCursor` as `--after` for the next page. Archival defaults to dry-run; `--apply` copies only acknowledged sent records with byte verification before removing their active copies. Stop affected writers before operator maintenance. Preserve unresolved legacy deliveries and verify their provenance manually; a fresh v2 directory never settles them automatically.
 
 If an enabled outbox cannot write, the active adapter can retain a `mem_*` recovery ID in memory. That ID disappears when the adapter exits and cannot be recovered by a separate CLI process.
 
