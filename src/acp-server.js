@@ -147,14 +147,21 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
   // only durable condition inert in the default configuration, where the outbox
   // is off, and every test of reconciliation ran in exactly that configuration.
   const unsettledDeliveryRefusal = async (channelId) => {
-    if (!outbox?.enabled || typeof outbox.list !== 'function') return 'delivery outbox is disabled';
-    let records;
-    try { records = await outbox.list(); }
-    catch { return 'delivery outbox is unreadable'; }
-    return records.some((record) => record?.channelId === channelId &&
-      (record.status === 'uncertain' || record.status === 'inflight'))
-      ? 'an unsettled delivery is waiting'
-      : null;
+    if (!outbox?.enabled) return 'delivery outbox is disabled';
+    try {
+      if (typeof outbox.hasUnsettledDelivery === 'function') {
+        const unsettled = await outbox.hasUnsettledDelivery(channelId);
+        if (typeof unsettled !== 'boolean') return 'delivery outbox is unreadable';
+        return unsettled ? 'an unsettled delivery is waiting' : null;
+      }
+      // Compatibility for injected outbox implementations. The production store
+      // uses the complete streaming scan, independent of operator pagination.
+      if (typeof outbox.list !== 'function') return 'delivery outbox is disabled';
+      const records = await outbox.list();
+      return records.some((record) => record?.channelId?.toLowerCase() === channelId.toLowerCase() &&
+        (record.status === 'uncertain' || record.status === 'inflight'))
+        ? 'an unsettled delivery is waiting' : null;
+    } catch { return 'delivery outbox is unreadable'; }
   };
 
   // In-process half of the reconciliation guard. The other half is the session

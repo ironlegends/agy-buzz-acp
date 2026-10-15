@@ -1,6 +1,6 @@
 # Contributing
 
-Keep changes focused and write public documentation, comments, tests, diagnostics and activity labels with clear, consistent wording. Use Node.js 20-compatible APIs. The native file-lock dependency is an intentional exception to the minimal-dependency policy: persistence must not rely on a graceful Buzz shutdown. Avoid unrelated dependencies.
+Keep changes focused and write public documentation, comments, tests, diagnostics and activity labels with clear, consistent wording. Use Node.js 22-compatible APIs. Required CI covers maintained Node 22/24 LTS majors; Node 26 is exploratory. Update the engine, Doctor minimum and compatibility manifest together when changing runtime support. The native file-lock dependency is an intentional exception to the minimal-dependency policy: persistence must not rely on a graceful Buzz shutdown. Avoid unrelated dependencies.
 
 Run `npm test`, `npm run check`, and `git diff --check`. Add regression tests before behavioral fixes. Test provider integration with synthetic content and a fake publisher; do not send test messages to real channels without authorization.
 

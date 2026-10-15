@@ -797,9 +797,8 @@ test('ignores stale child events after cancellation and remains fail closed', as
 test('pins the agy print timeout far above the Buzz 7200s max-turn ceiling', () => {
   const match = /^(\d+)h$/.exec(PINNED_PRINT_TIMEOUT);
   assert.ok(match, `expected an hour-denominated pin, got ${PINNED_PRINT_TIMEOUT}`);
-  // agy's cap is a wall clock over the whole process, and AgySession reuses one
-  // child across turns. Equal to the Buzz ceiling is not enough: a process alive
-  // that long dies mid-turn without a result event.
+  // Keep margin for providers that apply the cap across a reused process.
+  // Current provider timeout semantics are characterized separately.
   assert.ok(Number(match[1]) * 3600 > 7200, `pin ${PINNED_PRINT_TIMEOUT} must exceed the 7200s Buzz max-turn wall`);
 });
 
@@ -813,9 +812,10 @@ test('reports the agy process age when the child exits before completing a promp
     child.kill = () => true;
     return child;
   };
-  const clock = [1_000, 7_204_000];
-  const session = new AgySession({ cwd: root, spawnFn, nowFn: () => clock.shift() });
+  let now = 1_000;
+  const session = new AgySession({ cwd: root, spawnFn, nowFn: () => now });
   const pending = session.prompt('long turn', () => {});
+  now = 7_204_000;
   child.emit('close');
   await assert.rejects(pending, (error) => {
     assert.equal(error.rpcMessage, 'agy exited before completing the prompt (process age 7203s)');

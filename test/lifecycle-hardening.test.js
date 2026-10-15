@@ -139,6 +139,27 @@ async function readRecord(state, channelId) {
   return JSON.parse(await readFile(state.path(channelId), 'utf8'));
 }
 
+for (const verdict of [false, true, undefined]) {
+  test(`channel transfer uses the complete outbox scan and rejects an invalid verdict (${verdict})`, async t => {
+    const root = await mkdtemp(join(tmpdir(), 'agy-complete-scan-'));
+    const app = await startDurableServer({ root, sessionFactory: recordingSessionFactory([]),
+      publisherFactory: () => ({ publish: async () => ({ status: 'sent', eventId: event('a') }) }) });
+    t.after(async () => { await app.close(); await rm(root, { recursive: true, force: true }); });
+    const channelId = channel('a');
+    const first = await app.newSession();
+    assert.equal((await app.prompt(first, promptFor(channelId, event('b')))).result.publication.status, 'sent');
+    let completeScans = 0, legacyLists = 0;
+    app.outbox.hasUnsettledDelivery = async value => { assert.equal(value, channelId); completeScans++; return verdict; };
+    app.outbox.list = async () => { legacyLists++; throw new Error('history exceeds the compatibility list limit'); };
+    const replacement = await app.newSession();
+    const response = await app.prompt(replacement, promptFor(channelId, event('c')));
+    if (verdict === false) assert.equal(response.result?.publication.status, 'sent');
+    else assert.ok(response.error, 'unsettled or unevaluable scan must refuse transfer');
+    assert.equal(completeScans, 1);
+    assert.equal(legacyLists, 0);
+  });
+}
+
 async function waitFor(predicate, { timeoutMs = 5000, intervalMs = 20 } = {}) {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
