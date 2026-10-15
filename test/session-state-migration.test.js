@@ -108,7 +108,7 @@ test('migration refuses unknown files and opaque locks without changing source',
     (error) => error.code === 'AGY_STATE_MIGRATION_UNKNOWN_FILE');
   assert.deepEqual(await sourceSnapshot(sourceDir), before);
   await rm(join(sourceDir, 'notes.txt'));
-  await writeFile(join(sourceDir, `.${'f'.repeat(64)}.lock`), '');
+  await writeFile(join(sourceDir, `.${'f'.repeat(64)}.lock`), '', { mode: 0o600 });
   const withOpaqueLock = await sourceSnapshot(sourceDir);
   await assert.rejects(migrateLegacySessionState({ sourceDir, destinationDir, owner, relay }),
     (error) => error.code === 'AGY_STATE_MIGRATION_OPAQUE_LOCK');

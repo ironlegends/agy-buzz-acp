@@ -259,7 +259,7 @@ test('archive refuses overlapping paths and existing destinations without deleti
 
   const archiveDir = join(tmpdir(), 'agy-outbox-collision-' + process.pid + '-' + Date.now());
   t.after(() => rm(archiveDir, { recursive: true, force: true }));
-  await mkdir(archiveDir);
+  await mkdir(archiveDir, { mode: 0o700 });
   const collisionBytes = Buffer.from('leave existing archive untouched\n');
   await writeFile(join(archiveDir, id + '.json'), collisionBytes);
   await assert.rejects(box.archiveSent({ archiveDir, dryRun: false }),
