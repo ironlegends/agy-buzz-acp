@@ -14,6 +14,21 @@ Do not substitute one level for another. In particular, CI on an OS does not pro
 
 ## Version 0.6.0 candidate baseline (2026-10-15)
 
+### Platform support and evidence
+
+The adapter targets the following desktop environments with Node.js 22 or newer. AGY and Buzz must be installed and authenticated separately. Fixture and extracted-package checks validate adapter behavior without an authenticated provider or real publication.
+
+| Target | Blocking Node 22/24 CI | Installed AGY/Buzz evidence |
+| --- | --- | --- |
+| Windows x64 | `windows-latest` | Dedicated Windows validation recorded below; a later required Node 22 CI run exposed the separately tracked intermittent ACL-inspection refusal. |
+| macOS Apple Silicon | `macos-latest` | Real-provider, relay and Desktop checks remain unverified. |
+| macOS Intel | `macos-15-intel` | Explicit architecture coverage added for the portability fix; real-provider, relay and Desktop checks remain unverified. |
+| Linux x64 | `ubuntu-latest` | Real-provider, relay and Desktop checks remain unverified. |
+
+Node 26 remains exploratory on the original three OS labels. Native prebuilds exist for Windows/Linux ARM64, but these variants have no dedicated CI or installed-provider proof in this matrix. Linux coverage uses Ubuntu; it does not establish Alpine/musl or every Linux distribution.
+
+macOS may expose its temporary directory through system aliases such as `/var` or `/tmp`. Runtime-owned initialization-lock and default steering directories resolve the existing OS temporary base before appending their own child names. Explicit user-selected state, steering and bridge paths retain the symlink refusals, as do children below the resolved temporary base. Fresh-process regressions set an aliased temporary directory without the fixture environment preload so the tests do not mask this launch configuration.
+
 Version 0.6.0 is an unreleased candidate. The package requires Node.js 22 or newer. The maintained LTS majors, Node 22 and 24, are the blocking CI targets on Ubuntu, Windows and macOS. Node 26 is an exploratory CI target on the same operating systems and does not block the build. CI and fixture results establish adapter behavior for those test environments; they do not establish provider availability or compatibility with a live Buzz installation.
 
 The isolated ACP canary ran on Node.js 24.14.0 on Windows with the installed Antigravity CLI at version 1.3.5. The earlier CLI observation on 2026-10-15 was version 1.3.3; no explicit update command between those observations was recorded. Both model listings returned six verified models. The canary passed ACP initialization, a normal turn, checkpoint resume with the same conversation, and cancellation. It used a fake publisher, producing two fake publications and zero real publications. Observed ACP events included `init`, `result` and `step_update` with `agent_response`, `system_message` and `user_input` content. Steering was not run because the dedicated hook was not configured. This canary does not establish real relay delivery or installation in Buzz Desktop.

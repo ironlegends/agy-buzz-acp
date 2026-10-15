@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { execFile as execFileCallback } from 'node:child_process';
-import { chmod, lstat, mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, mkdtemp, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises';
 import { promisify } from 'node:util';
 import { setTimeout as pause } from 'node:timers/promises';
 import { tmpdir } from 'node:os';
@@ -741,7 +741,7 @@ export class SteeringCoordinator {
 }
 
 export async function createSteeringCoordinator({
-  rootDir = join(tmpdir(), 'agy-buzz-steering'),
+  rootDir,
   bridgeDir,
   ownerId,
   channelId,
@@ -755,7 +755,10 @@ export async function createSteeringCoordinator({
   if (!injectorExclusive || !hookConfigured) {
     return new SteeringCoordinator({ bridgeDir: '', binding, enabled: false, hookConfigured, injectorExclusive, conversationBound });
   }
-  const root = normalizeRoot(rootDir);
+  const defaultRootDir = rootDir === undefined
+    ? join(await realpath(tmpdir()), 'agy-buzz-steering')
+    : rootDir;
+  const root = normalizeRoot(defaultRootDir);
   await ensurePrivateDirectory(root, { create: true, validateExisting: false });
   const path = bridgeDir ? normalizeBridgePath(bridgeDir) : await mkdtemp(join(root, 'agy-steer-'));
   await ensurePrivateDirectory(path, { create: true, owned: !bridgeDir });

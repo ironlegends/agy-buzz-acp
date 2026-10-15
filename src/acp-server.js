@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
+import { realpath } from 'node:fs/promises';
 import { isAbsolute, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { promptToText } from './prompt.js';
@@ -126,11 +127,11 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
   let publisher;
   let initialized = false;
   let closing = false;
-  function steeringLocation(channelId) {
+  async function steeringLocation(channelId) {
     channelId = canonicalChannelId(channelId);
     if (!channelId) throw steeringRpcError('agy steering channel is invalid', -32602);
     const ownerId = resolvedSteeringConfig.ownerId ?? sessionState?.owner;
-    const rootDir = resolvedSteeringConfig.rootDir ?? join(tmpdir(), 'agy-buzz-steering');
+    const rootDir = resolvedSteeringConfig.rootDir ?? join(await realpath(tmpdir()), 'agy-buzz-steering');
     const bridgeKey = createHash('sha256').update(`${ownerId ?? 'test'}:${channelId}`).digest('hex');
     const steeringSessionId = `channel_${createHash('sha256').update(channelId).digest('hex').slice(0, 96)}`;
     return { ownerId, rootDir, bridgeDir: join(rootDir, `channel-${bridgeKey}`), steeringSessionId };
@@ -205,7 +206,7 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
 
   async function inspectExistingSteering(entry, channelId, sessionId) {
     if (!steeringCapability || steeringFactory) return;
-    const location = steeringLocation(channelId);
+    const location = await steeringLocation(channelId);
     if (!OWNER_RE.test(location.ownerId ?? '')) return;
     const status = await inspectSteeringBridge({
       bridgeDir: location.bridgeDir,
@@ -239,7 +240,7 @@ export function createAcpServer({ input = process.stdin, output = process.stdout
     const knownConversationId = entry.session.getConversationId?.();
     const ownerId = resolvedSteeringConfig.ownerId ?? sessionState?.owner;
     if (!steeringFactory && !OWNER_RE.test(ownerId ?? '')) return null;
-    const location = steeringLocation(channelId);
+    const location = await steeringLocation(channelId);
     const conversationBound = typeof knownConversationId === 'string' && knownConversationId.length > 0;
     const conversationId = conversationBound ? knownConversationId : `pending-${location.steeringSessionId}`;
     const coordinator = await makeSteering({
